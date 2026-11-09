@@ -92,6 +92,20 @@ export const IPC = {
    */
   workspaceFileReveal: "desktop:workspace-file-reveal",
   workspaceFileOpen: "desktop:workspace-file-open",
+  /**
+   * Dictation (plan 20261110-desktop-dictation): renderer → main. The keys stay in main; these carry
+   * plain-text context, PCM audio and session ids only.
+   */
+  dictationStart: "desktop:dictation-start",
+  dictationAudio: "desktop:dictation-audio",
+  dictationFinish: "desktop:dictation-finish",
+  dictationCancel: "desktop:dictation-cancel",
+  microphoneAccess: "desktop:microphone-access",
+  openMicrophoneSettings: "desktop:open-microphone-settings",
+  /** The 「去设置」 of an invalid speech key: main sends the `open-settings` command back. */
+  openSettings: "desktop:open-settings",
+  /** 主进程 → 渲染层：dictation events (text, result, failed, closed). */
+  dictationEvent: "desktop:dictation-event",
   /** 主进程 → 渲染层 */
   focusNotification: "desktop:focus-notification",
   focusWorkspace: "desktop:focus-workspace",

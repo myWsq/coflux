@@ -90,3 +90,39 @@ export function decideTerminalKeyOwner(event: TerminalKeyEvent): TerminalKeyOwne
   if (event.shiftKey !== true && event.code === "KeyA") return "select-all";
   return "app";
 }
+
+/**
+ * Dictation keys in the focused pane (plan 20261110-desktop-dictation D8). ⌥Space drives the
+ * dictation; while the bubble shows anything Esc cancels it, and in the confirm state ⏎ sends,
+ * ⌘⏎ inserts and ⇧⏎ adds a line break. Only with dictation configured: otherwise ⌥Space and every
+ * other key reach the terminal exactly as before. Every other ⌥ combination stays the terminal's.
+ *
+ * The caller withholds a key it acts on from xterm on keydown *and* on the matching keyup (kitty
+ * REPORT_EVENT_TYPES would otherwise see a release without a press), and cancels the keydown's
+ * default so no keypress (⌥Space's no-break space, Enter's carriage return) follows.
+ */
+export type DictationKeyAction = "press" | "swallow" | "cancel" | "send" | "insert" | "newline";
+
+export type DictationKeyState = {
+  available: boolean;
+  /** The bubble or the button shows something (any phase but idle). */
+  active: boolean;
+  confirming: boolean;
+};
+
+export function isDictationShortcut(event: TerminalKeyEvent): boolean {
+  return event.code === "Space" && event.altKey === true && event.metaKey !== true && event.ctrlKey !== true && event.shiftKey !== true;
+}
+
+/** What a keydown does to the dictation, or null when it is the terminal's. */
+export function decideDictationKey(event: TerminalKeyEvent & { repeat?: boolean }, state: DictationKeyState): DictationKeyAction | null {
+  if (!state.available) return null;
+  if (isDictationShortcut(event)) return event.repeat === true ? "swallow" : "press";
+  const plain = event.altKey !== true && event.ctrlKey !== true;
+  if (event.code === "Escape" && state.active && plain && event.metaKey !== true && event.shiftKey !== true) return "cancel";
+  if (!state.confirming || !plain || (event.code !== "Enter" && event.code !== "NumpadEnter")) return null;
+  if (event.metaKey === true && event.shiftKey !== true) return "insert";
+  if (event.shiftKey === true && event.metaKey !== true) return "newline";
+  if (event.metaKey !== true && event.shiftKey !== true) return "send";
+  return null;
+}

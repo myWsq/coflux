@@ -40,7 +40,9 @@ export function SecretRequestCards({
 }) {
   if (requests.length === 0) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 flex flex-col items-end gap-2 px-4">
+    // Lifted above the pane's dictation button while it is shown (plan 20261110-desktop-dictation
+    // D11): the pane sets `--dictation-clearance`.
+    <div className="pointer-events-none absolute inset-x-0 bottom-[calc(1rem+var(--dictation-clearance,0px))] z-30 flex flex-col items-end gap-2 px-4">
       {requests.map((request) => (
         <SecretRequestCard key={request.requestId} request={request} source={source} deviceName={deviceName} onAnswer={onAnswer} />
       ))}

@@ -1372,6 +1372,21 @@ INSERT INTO coflux.account_speech_providers (account_id, provider, base_url, mod
 DROP TABLE coflux.account_speech_keys;
 `;
 
+/** Version 13 (plan 20261109-dictation-refine): the account's dictation correction configuration — the
+ * switch, an OpenAI-compatible base URL and model as typed, and an optional key encrypted with the
+ * executor secret keys. No row means disabled and unconfigured. **One-way**: a server rolled back to a
+ * build before this migration ignores the table, and a later migration run finds version 13 recorded. */
+const ACCOUNT_SPEECH_REFINE_SCHEMA_SQL = `
+CREATE TABLE coflux.account_speech_refine (
+  account_id TEXT PRIMARY KEY REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  base_url TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  api_key_ciphertext TEXT,
+  updated_at DOUBLE PRECISION NOT NULL
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1456,6 +1471,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "account_speech_providers",
     definition: ACCOUNT_SPEECH_PROVIDERS_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_PROVIDERS_SCHEMA_SQL); },
+  },
+  {
+    version: 13,
+    name: "account_speech_refine",
+    definition: ACCOUNT_SPEECH_REFINE_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_REFINE_SCHEMA_SQL); },
   },
 ];
 

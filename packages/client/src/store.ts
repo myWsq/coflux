@@ -300,11 +300,19 @@ export const SPEECH_PROVIDER_DEFAULTS: Readonly<
  * whether a key is stored and when the slot was last written (ms epoch, center clock, 0 = never).
  * Never the key itself. */
 export type SpeechProviderState = { baseUrl: string; model: string; keyConfigured: boolean; updatedAt: number };
-/** The account's dictation configuration: the provider in use and both slots. */
-export type SpeechConfig = { active: SpeechProviderId; providers: Readonly<Record<SpeechProviderId, SpeechProviderState>> };
+/** The account's dictation correction record (plan 20261109-dictation-refine): the switch, the
+ * OpenAI-compatible base URL and chat model as stored, whether a key is stored and when it was last
+ * written (ms epoch, center clock, 0 = never). Never the key itself. */
+export type SpeechRefineState = { enabled: boolean; baseUrl: string; model: string; keyConfigured: boolean; updatedAt: number };
+/** The account's dictation configuration: the provider in use, both slots and the correction record. */
+export type SpeechConfig = {
+  active: SpeechProviderId;
+  providers: Readonly<Record<SpeechProviderId, SpeechProviderState>>;
+  refine: SpeechRefineState;
+};
 /** What a slot write does with its key: keep the stored one, replace it, or remove it. */
 export type SpeechKeyChange = { kind: "keep" } | { kind: "replace"; apiKey: string } | { kind: "clear" };
-/** Answer to `setSpeechProviderConfig` / `setSpeechActiveProvider`: the center accepted the write
+/** Answer to `setSpeechProviderConfig` / `setSpeechActiveProvider` / `setSpeechRefine`: the center accepted the write
  * (its broadcast has already replaced `speechConfig`), or it failed — refused by the center, or
  * locally (not connected, the center does not support it, disconnected, timed out). */
 export type SpeechWriteResult = { ok: true } | { ok: false; error: string };
@@ -315,6 +323,7 @@ const MAX_SPEECH_KEY_CHARS = 256;
 const SPEECH_INVALID_CHARS = /[\s\u0000-\u001f\u007f]/u;
 const SPEECH_DOUBAO_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SPEECH_OPENAI_MODEL_PATTERN = /^gpt-live-transcribe(-[A-Za-z0-9._-]+)?$/;
+const SPEECH_REFINE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 const SPEECH_PROVIDER_WIRE: Readonly<Record<SpeechProviderId, SpeechProvider>> = {
   doubao: SpeechProvider.DOUBAO,
   openai: SpeechProvider.OPENAI,
@@ -335,27 +344,55 @@ export function speechConfigInputError(
 ): string | undefined {
   const baseUrl = input.baseUrl.trim();
   const model = input.model.trim();
-  const apiKey = input.apiKey.trim();
-  if (baseUrl !== "") {
-    const scheme = provider === "doubao" ? "wss:" : "https:";
-    if (baseUrl.length > MAX_SPEECH_BASE_URL_CHARS) return `Base URL 不能超过 ${MAX_SPEECH_BASE_URL_CHARS} 个字符`;
-    if (SPEECH_INVALID_CHARS.test(baseUrl)) return "Base URL 不能包含空白或控制字符";
-    const schemeError = `Base URL 必须是完整的 ${scheme}// 地址`;
-    let parsed: URL;
-    try {
-      parsed = new URL(baseUrl);
-    } catch {
-      return schemeError;
-    }
-    if (parsed.protocol !== scheme || parsed.hostname === "") return schemeError;
-    if (parsed.username !== "" || parsed.password !== "") return "Base URL 不能包含用户名或密码";
-    if (baseUrl.includes("?") || baseUrl.includes("#")) return "Base URL 不能包含查询参数或片段";
-  }
+  const baseUrlError = speechBaseUrlInputError(provider === "doubao" ? "wss:" : "https:", baseUrl);
+  if (baseUrlError) return baseUrlError;
   if (model !== "") {
     if (model.length > MAX_SPEECH_MODEL_CHARS) return `模型不能超过 ${MAX_SPEECH_MODEL_CHARS} 个字符`;
     if (provider === "openai" && !SPEECH_OPENAI_MODEL_PATTERN.test(model)) return "OpenAI 只支持 gpt-live-transcribe 系列的实时转写模型";
     if (provider === "doubao" && !SPEECH_DOUBAO_MODEL_PATTERN.test(model)) return "模型只能包含字母、数字、点、下划线和连字符，且以字母或数字开头";
   }
+  return speechKeyInputError(input.apiKey.trim());
+}
+/**
+ * The first problem with the correction form's input (plan 20261109-dictation-refine), mirroring the
+ * center's rules for immediate feedback (the center stays the authority), or undefined when it can be
+ * sent. Values are checked trimmed; an empty key means "no new key". Turning correction on needs a
+ * base URL and a model.
+ */
+export function speechRefineInputError(input: { enabled: boolean; baseUrl: string; model: string; apiKey: string }): string | undefined {
+  const baseUrl = input.baseUrl.trim();
+  const model = input.model.trim();
+  const baseUrlError = speechBaseUrlInputError("https:", baseUrl);
+  if (baseUrlError) return baseUrlError;
+  if (model !== "") {
+    if (model.length > MAX_SPEECH_MODEL_CHARS) return `模型不能超过 ${MAX_SPEECH_MODEL_CHARS} 个字符`;
+    if (!SPEECH_REFINE_MODEL_PATTERN.test(model)) return "模型只能包含字母、数字、点、下划线、冒号、斜杠和连字符，且以字母或数字开头";
+  }
+  const keyError = speechKeyInputError(input.apiKey.trim());
+  if (keyError) return keyError;
+  if (input.enabled && (baseUrl === "" || model === "")) return "开启识别后整理前请先填写 Base URL 和模型";
+  return undefined;
+}
+/** A trimmed base URL's problem: empty is fine; otherwise an absolute URL of `scheme` without
+ * credentials, query or fragment. */
+function speechBaseUrlInputError(scheme: "wss:" | "https:", baseUrl: string): string | undefined {
+  if (baseUrl === "") return undefined;
+  if (baseUrl.length > MAX_SPEECH_BASE_URL_CHARS) return `Base URL 不能超过 ${MAX_SPEECH_BASE_URL_CHARS} 个字符`;
+  if (SPEECH_INVALID_CHARS.test(baseUrl)) return "Base URL 不能包含空白或控制字符";
+  const schemeError = `Base URL 必须是完整的 ${scheme}// 地址`;
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return schemeError;
+  }
+  if (parsed.protocol !== scheme || parsed.hostname === "") return schemeError;
+  if (parsed.username !== "" || parsed.password !== "") return "Base URL 不能包含用户名或密码";
+  if (baseUrl.includes("?") || baseUrl.includes("#")) return "Base URL 不能包含查询参数或片段";
+  return undefined;
+}
+/** A trimmed key's problem; empty means "no new key" and is fine. */
+function speechKeyInputError(apiKey: string): string | undefined {
   if (apiKey.length > MAX_SPEECH_KEY_CHARS) return `API Key 不能超过 ${MAX_SPEECH_KEY_CHARS} 个字符`;
   if (SPEECH_INVALID_CHARS.test(apiKey)) return "API Key 不能包含空白或控制字符";
   return undefined;
@@ -578,6 +615,10 @@ export type CofluxState = {
    * (`AuthOk.speech_providers`, plan 20261109-speech-providers). False before the first authOk and
    * against an older center. */
   speechConfigSupported: boolean;
+  /** The center of the current connection stores the dictation correction record
+   * (`AuthOk.speech_refine`, plan 20261109-dictation-refine). False before the first authOk and
+   * against an older center, which tells "not supported" apart from "not configured". */
+  speechRefineSupported: boolean;
   /** The account's dictation configuration, replaced by every `speechConfigStatus` without an error.
    * Null until the first status arrives. Kept across disconnects like `agentSettings`, but never saved
    * with the offline catalog; reset when the account changes. The desktop never holds a key. */
@@ -852,6 +893,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     agentSettingsReceived: false,
     projectArchiveSupported: false,
     speechConfigSupported: false,
+    speechRefineSupported: false,
     speechConfig: null,
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
@@ -1520,7 +1562,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           speechConfigAccount = value.accountId;
           store.setState({ speechConfig: null });
         }
-        store.setState({ speechConfigSupported: value.speechProviders });
+        store.setState({ speechConfigSupported: value.speechProviders, speechRefineSupported: value.speechRefine });
         // Terminal content: fetched through TaskRead when the center serves metadata, else taken
         // from the checkpoints it pushes (plan 20261010-terminal-checkpoint-energy).
         sessionMetadataSupported = value.sessionMetadata;
@@ -1553,7 +1595,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         store.setState({ agentSettings: EMPTY_AGENT_SETTINGS, agentSettingsSupported: false, agentSettingsReceived: false });
         speechConfigAccount = "";
         failSpeechWrites("登录已失效，修改没有保存");
-        store.setState({ speechConfigSupported: false, speechConfig: null });
+        store.setState({ speechConfigSupported: false, speechRefineSupported: false, speechConfig: null });
         store.setState({ projectArchiveSupported: false });
         // Show the server's own reason. This branch is reached by an expired session token, a
         // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
@@ -1577,7 +1619,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         shouldRetry = false;
         speechConfigAccount = "";
         failSpeechWrites("客户端版本过旧，修改没有保存");
-        store.setState({ authState: "outdated", speechConfigSupported: false, speechConfig: null });
+        store.setState({ authState: "outdated", speechConfigSupported: false, speechRefineSupported: false, speechConfig: null });
         break;
       }
       case "notificationPage": {
@@ -1963,7 +2005,16 @@ export function createCofluxClient(options: CofluxClientOptions) {
           const id = speechProviderId(entry.provider);
           if (id) providers[id] = { baseUrl: entry.baseUrl, model: entry.model, keyConfigured: entry.keyConfigured, updatedAt: entry.updatedAt };
         }
-        store.setState({ speechConfig: { active: speechProviderId(value.active) ?? "doubao", providers } });
+        const refine: SpeechRefineState = value.refine
+          ? {
+              enabled: value.refine.enabled,
+              baseUrl: value.refine.baseUrl,
+              model: value.refine.model,
+              keyConfigured: value.refine.keyConfigured,
+              updatedAt: value.refine.updatedAt,
+            }
+          : { enabled: false, baseUrl: "", model: "", keyConfigured: false, updatedAt: 0 };
+        store.setState({ speechConfig: { active: speechProviderId(value.active) ?? "doubao", providers, refine } });
         // After the state: a writer awaiting its result sees the configuration it produced.
         if (value.requestId) settleSpeechWrite(value.requestId, { ok: true });
         break;
@@ -2057,6 +2108,29 @@ export function createCofluxClient(options: CofluxClientOptions) {
       value: {
         requestId,
         provider: SPEECH_PROVIDER_WIRE[provider],
+        baseUrl: config.baseUrl.trim(),
+        model: config.model.trim(),
+        apiKey,
+        clearApiKey: config.key.kind === "clear",
+      },
+    }));
+  }
+
+  /**
+   * Replace the dictation correction switch, base URL and model and keep, replace or clear its key
+   * (plan 20261109-dictation-refine). On success every subscribed client of the account has received
+   * the new configuration. A new key is sent once and never kept here; this client never reads it back.
+   */
+  function setSpeechRefine(config: { enabled: boolean; baseUrl: string; model: string; key: SpeechKeyChange }): Promise<SpeechWriteResult> {
+    if (controlAuthenticated && !store.getState().speechRefineSupported) {
+      return Promise.resolve({ ok: false, error: "服务器版本过旧，不支持识别后整理" });
+    }
+    const apiKey = config.key.kind === "replace" ? config.key.apiKey.trim() : "";
+    return sendSpeechWrite((requestId) => ({
+      case: "speechRefineSet",
+      value: {
+        requestId,
+        enabled: config.enabled,
         baseUrl: config.baseUrl.trim(),
         model: config.model.trim(),
         apiKey,
@@ -2162,6 +2236,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       agentSettingsReceived: false,
       projectArchiveSupported: false,
       speechConfigSupported: false,
+      speechRefineSupported: false,
       speechConfig: null,
     });
   }
@@ -2629,6 +2704,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     setAgentSetting,
     setSpeechProviderConfig,
     setSpeechActiveProvider,
+    setSpeechRefine,
     ensureDirectoryWorkspace,
     holdsTaskTerminal,
     typeIntoHeldTerminal,

@@ -936,6 +936,22 @@ public struct Coflux_V1_ClientToServer: Sendable {
     set {payload = .speechCredentialsGet(newValue)}
   }
 
+  public var speechRefineSet: Coflux_V1_SpeechRefineSet {
+    get {
+      if case .speechRefineSet(let v)? = payload {return v}
+      return Coflux_V1_SpeechRefineSet()
+    }
+    set {payload = .speechRefineSet(newValue)}
+  }
+
+  public var speechRefineCredentialsGet: Coflux_V1_SpeechRefineCredentialsGet {
+    get {
+      if case .speechRefineCredentialsGet(let v)? = payload {return v}
+      return Coflux_V1_SpeechRefineCredentialsGet()
+    }
+    set {payload = .speechRefineCredentialsGet(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -979,6 +995,8 @@ public struct Coflux_V1_ClientToServer: Sendable {
     case speechConfigSet(Coflux_V1_SpeechConfigSet)
     case speechActiveSet(Coflux_V1_SpeechActiveSet)
     case speechCredentialsGet(Coflux_V1_SpeechCredentialsGet)
+    case speechRefineSet(Coflux_V1_SpeechRefineSet)
+    case speechRefineCredentialsGet(Coflux_V1_SpeechRefineCredentialsGet)
 
   }
 
@@ -1044,6 +1062,12 @@ public struct Coflux_V1_AuthOk: Sendable {
   /// SpeechActiveSet / SpeechCredentialsGet. False (an older center) means the client must not send
   /// those three requests.
   public var speechProviders: Bool = false
+
+  /// This center stores the account's dictation correction configuration (plan
+  /// 20261109-dictation-refine): every SpeechConfigStatus without an error carries `refine`, and it
+  /// accepts SpeechRefineSet / SpeechRefineCredentialsGet. False (an older center) tells the client
+  /// "not supported" apart from "not configured" and means it must not send those two requests.
+  public var speechRefine: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1897,6 +1921,14 @@ public struct Coflux_V1_ServerToClient: Sendable {
     set {payload = .speechCredentials(newValue)}
   }
 
+  public var speechRefineCredentials: Coflux_V1_SpeechRefineCredentials {
+    get {
+      if case .speechRefineCredentials(let v)? = payload {return v}
+      return Coflux_V1_SpeechRefineCredentials()
+    }
+    set {payload = .speechRefineCredentials(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -1941,6 +1973,7 @@ public struct Coflux_V1_ServerToClient: Sendable {
     case speechKeyValue(Coflux_V1_SpeechKeyValue)
     case speechConfigStatus(Coflux_V1_SpeechConfigStatus)
     case speechCredentials(Coflux_V1_SpeechCredentials)
+    case speechRefineCredentials(Coflux_V1_SpeechRefineCredentials)
 
   }
 
@@ -2148,7 +2181,8 @@ public struct Coflux_V1_SpeechCredentialsGet: Sendable {
 /// SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account (request_id of that
 /// write; also sent directly to an unsubscribed writer). A non-empty `error` answers a rejected
 /// SpeechConfigSet / SpeechActiveSet, goes only to the writer, and its other fields must be ignored.
-/// `providers` always lists both providers, in enum order.
+/// `providers` always lists both providers, in enum order. Since plan 20261109-dictation-refine the
+/// status also answers SpeechRefineSet (same rules) and, without an error, always carries `refine`.
 public struct Coflux_V1_SpeechConfigStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2162,9 +2196,20 @@ public struct Coflux_V1_SpeechConfigStatus: Sendable {
 
   public var error: String = String()
 
+  public var refine: Coflux_V1_SpeechRefineConfig {
+    get {_refine ?? Coflux_V1_SpeechRefineConfig()}
+    set {_refine = newValue}
+  }
+  /// Returns true if `refine` has been explicitly set.
+  public var hasRefine: Bool {self._refine != nil}
+  /// Clears the value of `refine`. Subsequent reads from it will return its default value.
+  public mutating func clearRefine() {self._refine = nil}
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _refine: Coflux_V1_SpeechRefineConfig? = nil
 }
 
 /// Answer to SpeechCredentialsGet, only to the requesting connection. Base URL and model are the
@@ -2178,6 +2223,95 @@ public struct Coflux_V1_SpeechCredentials: Sendable {
   public var requestID: String = String()
 
   public var provider: Coflux_V1_SpeechProvider = .unspecified
+
+  public var baseURL: String = String()
+
+  public var model: String = String()
+
+  public var apiKey: String = String()
+
+  public var error: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Dictation correction configuration (plan 20261109-dictation-refine): an optional account-level
+/// OpenAI-compatible chat model the iOS app sends the recogniser's final text to, so it corrects
+/// misheard terms. It is its own record, never a SpeechProvider value. The center stores the key
+/// encrypted and never broadcasts it.
+/// The record as broadcast inside SpeechConfigStatus: never the key itself. `updated_at` is the last
+/// accepted write in ms epoch, center clock, 0 when never written (disabled and unconfigured).
+public struct Coflux_V1_SpeechRefineConfig: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var enabled: Bool = false
+
+  public var baseURL: String = String()
+
+  public var model: String = String()
+
+  public var keyConfigured: Bool = false
+
+  public var updatedAt: Double = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Replace the correction switch, base URL and model. As in SpeechConfigSet, a non-empty `api_key`
+/// replaces the key, `clear_api_key` removes it, neither keeps it; both at once is refused. Enabling
+/// with an empty base URL or model is refused. Answered with SpeechConfigStatus carrying the same
+/// request_id.
+public struct Coflux_V1_SpeechRefineSet: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var enabled: Bool = false
+
+  public var baseURL: String = String()
+
+  public var model: String = String()
+
+  public var apiKey: String = String()
+
+  public var clearApiKey_p: Bool = false
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Fetch the correction record's stored values and plaintext key. Answered with
+/// SpeechRefineCredentials, only to this connection.
+public struct Coflux_V1_SpeechRefineCredentialsGet: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// Answer to SpeechRefineCredentialsGet, only to the requesting connection; the only message that
+/// carries the correction key. Empty `api_key` with empty `error` means no key is stored; a non-empty
+/// `error` means the request was refused or the stored key could not be read.
+public struct Coflux_V1_SpeechRefineCredentials: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
 
   public var baseURL: String = String()
 
@@ -3294,7 +3428,7 @@ extension Coflux_V1_OAuthAuthorizeDecide: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientToServer"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{3}directory_workspace_ensure\0\u{3}agent_setting_set\0\u{3}project_set_archived\0\u{3}speech_key_set\0\u{3}speech_key_get\0\u{3}speech_config_set\0\u{3}speech_active_set\0\u{3}speech_credentials_get\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_auth\0\u{3}client_logout\0\u{3}client_subscribe\0\u{4}\u{2}client_remove_device\0\u{3}device_authorize_info\0\u{3}device_authorize\0\u{3}proxy_issue_auth\0\u{3}client_upgrade_daemon\0\u{3}project_import\0\u{3}project_remove\0\u{3}workspace_create\0\u{3}workspace_remove\0\u{3}task_create\0\u{3}task_start\0\u{4}\u{3}task_remove\0\u{4}\u{6}workspace_set_name\0\u{4}\u{2}device_set_name\0\u{3}local_pair_request\0\u{3}local_lease_request\0\u{4}\u{4}local_unpair_request\0\u{4}\u{2}terminal_create\0\u{4}\u{3}project_set_name\0\u{3}oauth_authorize_info\0\u{3}oauth_authorize_decide\0\u{3}task_read\0\u{3}notification_list\0\u{3}notification_read\0\u{3}device_tailcat_connect\0\u{3}device_tailcat_close\0\u{3}device_tailcat_control\0\u{3}device_tailcat_failed\0\u{3}device_join_key_create\0\u{3}directory_workspace_ensure\0\u{3}agent_setting_set\0\u{3}project_set_archived\0\u{3}speech_key_set\0\u{3}speech_key_get\0\u{3}speech_config_set\0\u{3}speech_active_set\0\u{3}speech_credentials_get\0\u{3}speech_refine_set\0\u{3}speech_refine_credentials_get\0\u{b}device_relay_connect\0\u{b}device_p2p_offer\0\u{b}device_p2p_channel_open\0\u{b}client_create_enrollment_key\0\u{b}task_attach\0\u{b}task_stop\0\u{b}pty_resize\0\u{b}client_exec\0\u{b}client_fs_list\0\u{b}client_fs_read\0\u{b}pty_input\0\u{b}client_fs_write\0\u{b}device_relay_open\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{4}\u{1}\u{c}\u{10}\u{1}\u{c}\u{11}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{15}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{19}\u{1}\u{c}\u{1d}\u{1}\u{c}\u{1e}\u{1}\u{c}\u{1f}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3822,6 +3956,32 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .speechCredentialsGet(v)
         }
       }()
+      case 56: try {
+        var v: Coflux_V1_SpeechRefineSet?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .speechRefineSet(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .speechRefineSet(v)
+        }
+      }()
+      case 57: try {
+        var v: Coflux_V1_SpeechRefineCredentialsGet?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .speechRefineCredentialsGet(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .speechRefineCredentialsGet(v)
+        }
+      }()
       default: break
       }
     }
@@ -3993,6 +4153,14 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .speechCredentialsGet(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 55)
     }()
+    case .speechRefineSet?: try {
+      guard case .speechRefineSet(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 56)
+    }()
+    case .speechRefineCredentialsGet?: try {
+      guard case .speechRefineCredentialsGet(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 57)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -4007,7 +4175,7 @@ extension Coflux_V1_ClientToServer: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthOk"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{3}session_metadata\0\u{3}project_archive\0\u{3}speech_key\0\u{3}speech_providers\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}client_token\0\u{4}\u{2}login_name\0\u{3}notification_inbox\0\u{3}control_protocol_version\0\u{3}agent_settings\0\u{3}session_metadata\0\u{3}project_archive\0\u{3}speech_key\0\u{3}speech_providers\0\u{3}speech_refine\0\u{b}ice_servers\0\u{c}\u{3}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4025,6 +4193,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       case 9: try { try decoder.decodeSingularBoolField(value: &self.projectArchive) }()
       case 10: try { try decoder.decodeSingularBoolField(value: &self.speechKey) }()
       case 11: try { try decoder.decodeSingularBoolField(value: &self.speechProviders) }()
+      case 12: try { try decoder.decodeSingularBoolField(value: &self.speechRefine) }()
       default: break
       }
     }
@@ -4065,6 +4234,9 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if self.speechProviders != false {
       try visitor.visitSingularBoolField(value: self.speechProviders, fieldNumber: 11)
     }
+    if self.speechRefine != false {
+      try visitor.visitSingularBoolField(value: self.speechRefine, fieldNumber: 12)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4079,6 +4251,7 @@ extension Coflux_V1_AuthOk: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     if lhs.projectArchive != rhs.projectArchive {return false}
     if lhs.speechKey != rhs.speechKey {return false}
     if lhs.speechProviders != rhs.speechProviders {return false}
+    if lhs.speechRefine != rhs.speechRefine {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -4925,7 +5098,7 @@ extension Coflux_V1_TaskReadResult: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerToClient"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{3}executor_runs_updated\0\u{3}directory_workspace_ensured\0\u{3}agent_settings_updated\0\u{3}session_metadata\0\u{3}speech_key_status\0\u{3}speech_key_value\0\u{3}speech_config_status\0\u{3}speech_credentials\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}auth_ok\0\u{3}auth_error\0\u{4}\u{2}device_authorize_info\0\u{3}device_authorized\0\u{3}proxy_auth\0\u{3}ports_updated\0\u{3}state_snapshot\0\u{3}daemon_updated\0\u{3}daemon_removed\0\u{3}project_created\0\u{3}project_removed\0\u{3}workspace_created\0\u{3}workspace_removed\0\u{3}task_updated\0\u{3}task_removed\0\u{2}\u{5}error\0\u{4}\u{3}client_outdated\0\u{3}local_pair_result\0\u{3}local_lease_result\0\u{4}\u{4}prepared_device_operation\0\u{3}session_checkpoint\0\u{3}local_unpair_result\0\u{4}\u{2}session_agents_updated\0\u{4}\u{3}oauth_authorize_info\0\u{3}oauth_authorize_result\0\u{3}task_read_result\0\u{3}notification_page\0\u{3}notification_changed\0\u{3}device_tailcat_result\0\u{3}device_tailcat_closed\0\u{3}device_join_key_created\0\u{3}secret_requests_updated\0\u{3}annotations_summary_updated\0\u{3}executor_runs_updated\0\u{3}directory_workspace_ensured\0\u{3}agent_settings_updated\0\u{3}session_metadata\0\u{3}speech_key_status\0\u{3}speech_key_value\0\u{3}speech_config_status\0\u{3}speech_credentials\0\u{3}speech_refine_credentials\0\u{b}device_relay_grant\0\u{b}device_p2p_answer\0\u{b}device_p2p_channel_result\0\u{b}enrollment_key_created\0\u{b}task_detached\0\u{b}exec_result\0\u{b}fs_listed\0\u{b}fs_read_result\0\u{b}pty_output\0\u{b}fs_write_result\0\u{b}device_relay_status\0\u{b}device_relay_frame\0\u{b}device_relay_close\0\u{c}!\u{1}\u{c}#\u{1}\u{c}$\u{1}\u{c}\u{3}\u{1}\u{c}\u{11}\u{1}\u{c}\u{12}\u{1}\u{c}\u{13}\u{1}\u{c}\u{14}\u{1}\u{c}\u{16}\u{1}\u{c}\u{17}\u{1}\u{c}\u{1b}\u{1}\u{c}\u{1c}\u{1}\u{c}\u{1d}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5466,6 +5639,19 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .speechCredentials(v)
         }
       }()
+      case 55: try {
+        var v: Coflux_V1_SpeechRefineCredentials?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .speechRefineCredentials(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .speechRefineCredentials(v)
+        }
+      }()
       default: break
       }
     }
@@ -5640,6 +5826,10 @@ extension Coflux_V1_ServerToClient: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .speechCredentials?: try {
       guard case .speechCredentials(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 54)
+    }()
+    case .speechRefineCredentials?: try {
+      guard case .speechRefineCredentials(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 55)
     }()
     case nil: break
     }
@@ -6060,7 +6250,7 @@ extension Coflux_V1_SpeechCredentialsGet: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Coflux_V1_SpeechConfigStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SpeechConfigStatus"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}active\0\u{1}providers\0\u{3}request_id\0\u{1}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}active\0\u{1}providers\0\u{3}request_id\0\u{1}error\0\u{1}refine\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6072,12 +6262,17 @@ extension Coflux_V1_SpeechConfigStatus: SwiftProtobuf.Message, SwiftProtobuf._Me
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.providers) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._refine) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if self.active != .unspecified {
       try visitor.visitSingularEnumField(value: self.active, fieldNumber: 1)
     }
@@ -6090,6 +6285,9 @@ extension Coflux_V1_SpeechConfigStatus: SwiftProtobuf.Message, SwiftProtobuf._Me
     if !self.error.isEmpty {
       try visitor.visitSingularStringField(value: self.error, fieldNumber: 4)
     }
+    try { if let v = self._refine {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6098,6 +6296,7 @@ extension Coflux_V1_SpeechConfigStatus: SwiftProtobuf.Message, SwiftProtobuf._Me
     if lhs.providers != rhs.providers {return false}
     if lhs.requestID != rhs.requestID {return false}
     if lhs.error != rhs.error {return false}
+    if lhs._refine != rhs._refine {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6149,6 +6348,191 @@ extension Coflux_V1_SpeechCredentials: SwiftProtobuf.Message, SwiftProtobuf._Mes
   public static func ==(lhs: Coflux_V1_SpeechCredentials, rhs: Coflux_V1_SpeechCredentials) -> Bool {
     if lhs.requestID != rhs.requestID {return false}
     if lhs.provider != rhs.provider {return false}
+    if lhs.baseURL != rhs.baseURL {return false}
+    if lhs.model != rhs.model {return false}
+    if lhs.apiKey != rhs.apiKey {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SpeechRefineConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SpeechRefineConfig"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}enabled\0\u{3}base_url\0\u{1}model\0\u{3}key_configured\0\u{3}updated_at\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBoolField(value: &self.enabled) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.baseURL) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.model) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.keyConfigured) }()
+      case 5: try { try decoder.decodeSingularDoubleField(value: &self.updatedAt) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.enabled != false {
+      try visitor.visitSingularBoolField(value: self.enabled, fieldNumber: 1)
+    }
+    if !self.baseURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.baseURL, fieldNumber: 2)
+    }
+    if !self.model.isEmpty {
+      try visitor.visitSingularStringField(value: self.model, fieldNumber: 3)
+    }
+    if self.keyConfigured != false {
+      try visitor.visitSingularBoolField(value: self.keyConfigured, fieldNumber: 4)
+    }
+    if self.updatedAt.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.updatedAt, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SpeechRefineConfig, rhs: Coflux_V1_SpeechRefineConfig) -> Bool {
+    if lhs.enabled != rhs.enabled {return false}
+    if lhs.baseURL != rhs.baseURL {return false}
+    if lhs.model != rhs.model {return false}
+    if lhs.keyConfigured != rhs.keyConfigured {return false}
+    if lhs.updatedAt != rhs.updatedAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SpeechRefineSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SpeechRefineSet"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}enabled\0\u{3}base_url\0\u{1}model\0\u{3}api_key\0\u{3}clear_api_key\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.enabled) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.baseURL) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.model) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.apiKey) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.clearApiKey_p) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.enabled != false {
+      try visitor.visitSingularBoolField(value: self.enabled, fieldNumber: 2)
+    }
+    if !self.baseURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.baseURL, fieldNumber: 3)
+    }
+    if !self.model.isEmpty {
+      try visitor.visitSingularStringField(value: self.model, fieldNumber: 4)
+    }
+    if !self.apiKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.apiKey, fieldNumber: 5)
+    }
+    if self.clearApiKey_p != false {
+      try visitor.visitSingularBoolField(value: self.clearApiKey_p, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SpeechRefineSet, rhs: Coflux_V1_SpeechRefineSet) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.enabled != rhs.enabled {return false}
+    if lhs.baseURL != rhs.baseURL {return false}
+    if lhs.model != rhs.model {return false}
+    if lhs.apiKey != rhs.apiKey {return false}
+    if lhs.clearApiKey_p != rhs.clearApiKey_p {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SpeechRefineCredentialsGet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SpeechRefineCredentialsGet"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SpeechRefineCredentialsGet, rhs: Coflux_V1_SpeechRefineCredentialsGet) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_SpeechRefineCredentials: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SpeechRefineCredentials"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}base_url\0\u{1}model\0\u{3}api_key\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.baseURL) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.model) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.apiKey) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.baseURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.baseURL, fieldNumber: 2)
+    }
+    if !self.model.isEmpty {
+      try visitor.visitSingularStringField(value: self.model, fieldNumber: 3)
+    }
+    if !self.apiKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.apiKey, fieldNumber: 4)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_SpeechRefineCredentials, rhs: Coflux_V1_SpeechRefineCredentials) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
     if lhs.baseURL != rhs.baseURL {return false}
     if lhs.model != rhs.model {return false}
     if lhs.apiKey != rhs.apiKey {return false}

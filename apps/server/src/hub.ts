@@ -78,6 +78,7 @@ import {
   type SpeechKeyAction,
   type SpeechProviderId,
   type SpeechProviderRecord,
+  type SpeechRefineRecord,
 } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
@@ -168,6 +169,9 @@ const MAX_SPEECH_BASE_URL_CHARS = 512;
 const MAX_SPEECH_MODEL_CHARS = 128;
 const SPEECH_DOUBAO_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SPEECH_OPENAI_MODEL_PATTERN = /^gpt-live-transcribe(-[A-Za-z0-9._-]+)?$/;
+/** Dictation correction (plan 20261109-dictation-refine): any OpenAI-compatible chat model id, which
+ * may carry a vendor prefix (`org/model`) or a tag (`model:tag`). */
+const SPEECH_REFINE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 /** Wire enum order: `SpeechConfigStatus.providers` always lists both, in this order. */
 const SPEECH_PROVIDERS: readonly { wire: SpeechProvider; id: SpeechProviderId; scheme: "wss:" | "https:" }[] = [
   { wire: SpeechProvider.DOUBAO, id: "doubao", scheme: "wss:" },
@@ -3435,6 +3439,14 @@ export class Hub {
         await this.getSpeechCredentials(client, msg.payload.value);
         break;
       }
+      case "speechRefineSet": {
+        await this.setSpeechRefine(client, msg.payload.value);
+        break;
+      }
+      case "speechRefineCredentialsGet": {
+        await this.getSpeechRefineCredentials(client, msg.payload.value.requestId);
+        break;
+      }
       case "deviceAuthorizeInfo": {
         const p = this.checkedPendingAuth(client, msg.payload.value.token);
         if (!p) break; // helper 已回过 error
@@ -4150,7 +4162,7 @@ export class Hub {
     client.tokenHash = tokenHash;
     client.sessionMetadata = msg.sessionMetadata === true;
     const loginName = await this.resolveLoginName(loginUserId, tokenHash);
-    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true, projectArchive: true, speechKey: true, speechProviders: true } });
+    this.sendClient(client, { case: "authOk", value: { accountId, clientToken: issued, loginName, controlProtocolVersion: CONTROL_PROTOCOL_VERSION, notificationInbox: true, agentSettings: true, sessionMetadata: true, projectArchive: true, speechKey: true, speechProviders: true, speechRefine: true } });
   }
 
   /** authOk 回带的「登录身份显示串」（plan 110）：local 模式恒为 env 用户名；password 模式按
@@ -4604,7 +4616,8 @@ export class Hub {
     }
   }
 
-  /** After an accepted speech write (any of the four write paths, plan 20261109-speech-providers):
+  /** After an accepted speech write (any of the five write paths, plans 20261109-speech-providers and
+   * 20261109-dictation-refine):
    * read the account's configuration back and send both the new and the pre-provider status (never
    * a key) to every subscribed client of the account — the writer included, and directly to an
    * unsubscribed writer — tagged with the write's request id. */
@@ -4777,6 +4790,77 @@ export class Hub {
       apiKey = this.executorSecrets.decrypt(row.ciphertext);
     } catch {
       log.warn("speech key undecryptable", { accountId, provider: provider.id });
+      return void reply({ error: SPEECH_KEY_UNDECRYPTABLE });
+    }
+    reply({ baseUrl: row.baseUrl, model: row.model, apiKey });
+  }
+
+  /** `speechRefineSet` (plan 20261109-dictation-refine): replace the correction switch, base URL and
+   * model and keep, replace or clear its key, then broadcast both statuses. A rejected write is
+   * answered with a `speechConfigStatus` error to the writer only. Clearing or keeping the key needs
+   * no encryption key. */
+  private async setSpeechRefine(
+    client: ClientConn,
+    value: { requestId: string; enabled: boolean; baseUrl: string; model: string; apiKey: string; clearApiKey: boolean },
+  ): Promise<void> {
+    const { requestId, enabled } = value;
+    const reject = (error: string) => this.sendClient(client, speechConfigError(requestId, error));
+    if (!validBoundedText(requestId, MAX_SPEECH_KEY_REQUEST_ID_BYTES)) return void reject("识别后整理设置请求无效");
+    const baseUrl = value.baseUrl.trim();
+    const model = value.model.trim();
+    const apiKey = value.apiKey.trim();
+    const fieldError = speechBaseUrlError("https:", baseUrl) ?? speechRefineModelError(model) ?? speechKeyError(apiKey);
+    if (fieldError) return void reject(fieldError);
+    if (apiKey !== "" && value.clearApiKey) return void reject("不能同时填写并清除 API Key");
+    if (enabled && (baseUrl === "" || model === "")) return void reject("开启识别后整理前请先填写 Base URL 和模型");
+    let key: SpeechKeyAction = value.clearApiKey ? { kind: "clear" } : { kind: "keep" };
+    if (apiKey !== "") {
+      const encrypted = this.encryptSpeechKey(apiKey);
+      if ("error" in encrypted) return void reject(encrypted.error);
+      key = { kind: "replace", ciphertext: encrypted.ciphertext };
+    }
+    const accountId = client.accountId!;
+    await this.chainSpeechWrite(accountId, async () => {
+      try {
+        await this.store.setSpeechRefine(accountId, enabled, baseUrl, model, key, Date.now());
+        await this.broadcastSpeechStatus(client, accountId, requestId);
+      } catch (error) {
+        log.warn("speech refine write failed", { accountId, error: String(error) });
+        reject("保存识别后整理设置失败，请重试");
+      }
+    });
+  }
+
+  /** `speechRefineCredentialsGet` (plan 20261109-dictation-refine): the correction record's stored
+   * base URL and model and plaintext key, only to the requesting connection. No key = empty key and
+   * empty error; an unreadable key is an error, never "no key". */
+  private async getSpeechRefineCredentials(client: ClientConn, requestId: string): Promise<void> {
+    const reply = (fields: { baseUrl?: string; model?: string; apiKey?: string; error?: string }) =>
+      this.sendClient(client, {
+        case: "speechRefineCredentials",
+        value: {
+          requestId,
+          baseUrl: fields.baseUrl ?? "",
+          model: fields.model ?? "",
+          apiKey: fields.apiKey ?? "",
+          error: fields.error ?? "",
+        },
+      });
+    if (!validBoundedText(requestId, MAX_SPEECH_KEY_REQUEST_ID_BYTES)) return void reply({ error: "识别后整理设置请求无效" });
+    const accountId = client.accountId!;
+    let row: SpeechRefineRecord;
+    try {
+      row = (await this.store.getSpeechConfig(accountId)).refine;
+    } catch (error) {
+      log.warn("speech refine credentials read failed", { accountId, error: String(error) });
+      return void reply({ error: "读取识别后整理设置失败，请重试" });
+    }
+    if (!row.ciphertext) return void reply({ baseUrl: row.baseUrl, model: row.model });
+    let apiKey: string;
+    try {
+      apiKey = this.executorSecrets.decrypt(row.ciphertext);
+    } catch {
+      log.warn("speech refine key undecryptable", { accountId });
       return void reply({ error: SPEECH_KEY_UNDECRYPTABLE });
     }
     reply({ baseUrl: row.baseUrl, model: row.model, apiKey });
@@ -5688,10 +5772,10 @@ function validCapabilities(values: readonly string[] | undefined): boolean {
 }
 
 /** Both speech statuses for one configuration (plan 20261109-speech-providers): the per-provider
- * `speechConfigStatus` and, derived from the Doubao slot, the pre-provider `speechKeyStatus` for older
- * clients. Neither carries a key. */
+ * `speechConfigStatus` (with the correction record, plan 20261109-dictation-refine) and, derived from
+ * the Doubao slot, the pre-provider `speechKeyStatus` for older clients. Neither carries a key. */
 function speechStatusPayloads(
-  speechConfig: { active: SpeechProviderId; providers: SpeechProviderRecord[] },
+  speechConfig: { active: SpeechProviderId; providers: SpeechProviderRecord[]; refine: SpeechRefineRecord },
   requestId: string,
 ): ServerToClientPayload[] {
   const providers = SPEECH_PROVIDERS.map((entry) => {
@@ -5706,8 +5790,15 @@ function speechStatusPayloads(
   });
   const active = SPEECH_PROVIDERS.find((entry) => entry.id === speechConfig.active)?.wire ?? SpeechProvider.DOUBAO;
   const doubao = providers.find((entry) => entry.provider === SpeechProvider.DOUBAO)!;
+  const refine = {
+    enabled: speechConfig.refine.enabled,
+    baseUrl: speechConfig.refine.baseUrl,
+    model: speechConfig.refine.model,
+    keyConfigured: Boolean(speechConfig.refine.ciphertext),
+    updatedAt: speechConfig.refine.updatedAt,
+  };
   return [
-    { case: "speechConfigStatus", value: { active, providers, requestId, error: "" } },
+    { case: "speechConfigStatus", value: { active, providers, refine, requestId, error: "" } },
     // Pre-provider contract: `updated_at` is 0 when no key is configured.
     {
       case: "speechKeyStatus",
@@ -5716,7 +5807,8 @@ function speechStatusPayloads(
   ];
 }
 
-/** A rejected SpeechConfigSet / SpeechActiveSet, to the writer only; its other fields are ignored. */
+/** A rejected SpeechConfigSet / SpeechActiveSet / SpeechRefineSet, to the writer only; its other fields
+ * are ignored. */
 function speechConfigError(requestId: string, error: string): ServerToClientPayload {
   return { case: "speechConfigStatus", value: { active: SpeechProvider.UNSPECIFIED, providers: [], requestId, error } };
 }
@@ -5758,6 +5850,16 @@ function speechModelError(provider: SpeechProviderId, model: string): string | u
     return SPEECH_OPENAI_MODEL_PATTERN.test(model) ? undefined : "OpenAI 只支持 gpt-live-transcribe 系列的实时转写模型";
   }
   return SPEECH_DOUBAO_MODEL_PATTERN.test(model) ? undefined : "模型只能包含字母、数字、点、下划线和连字符，且以字母或数字开头";
+}
+
+/** The refusal for an unusable correction model (already trimmed), or undefined when it is acceptable.
+ * Empty is acceptable while correction is off. */
+function speechRefineModelError(model: string): string | undefined {
+  if (model === "") return undefined;
+  if (model.length > MAX_SPEECH_MODEL_CHARS) return `模型不能超过 ${MAX_SPEECH_MODEL_CHARS} 个字符`;
+  return SPEECH_REFINE_MODEL_PATTERN.test(model)
+    ? undefined
+    : "模型只能包含字母、数字、点、下划线、冒号、斜杠和连字符，且以字母或数字开头";
 }
 
 function validBoundedText(value: string, maxBytes: number, allowEmpty = false, allowControl = false): boolean {

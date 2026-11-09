@@ -173,27 +173,57 @@ struct DictationOverlay: View {
     }
 
     /// 转写气泡：进行中纯展示；确认态可点，点进成文层编辑。
-    @ViewBuilder
+    /// The header stays outside the edit button so the 看原文 / 看整理后 toggle is its own control
+    /// (plan 20261109-dictation-refine).
     private var bubble: some View {
-        let content = VStack(alignment: .leading, spacing: 8) {
-            Text(confirming ? "识别结果 · 点按文字可编辑" : "正在聆听")
-                .font(Theme.Fonts.meta)
-                .foregroundStyle(Theme.mutedForeground)
-            Text(session.displayText.isEmpty ? "请说话…" : session.displayText)
-                .font(Theme.Fonts.transcript)
-                .foregroundStyle(session.isVolatile ? Theme.mutedForeground : Theme.foreground)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(header)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if confirming, session.result?.hasDistinctRefinement == true {
+                    Button(session.showsOriginal ? "看整理后" : "看原文") {
+                        session.showsOriginal.toggle()
+                    }
+                    .buttonStyle(.plain)
+                    .font(Theme.Fonts.meta.weight(.semibold))
+                    .foregroundStyle(Theme.primary)
+                    .lineLimit(1)
+                    .fixedSize()
+                }
+            }
+            if confirming {
+                Button(action: onEdit) { transcript.contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+            } else {
+                transcript
+            }
         }
         .padding(18)
         .frame(maxWidth: 560)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 26))
         .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(Theme.border, lineWidth: 1))
-        if confirming {
-            Button(action: onEdit) { content.contentShape(Rectangle()) }
-                .buttonStyle(.plain)
-        } else {
-            content
+    }
+
+    /// While listening the live text; in the confirm state the version on screen (corrected or
+    /// original).
+    private var transcript: some View {
+        let shown = confirming ? session.shownText : session.displayText
+        return Text(shown.isEmpty ? "请说话…" : shown)
+            .font(Theme.Fonts.transcript)
+            .foregroundStyle(session.isVolatile && !confirming ? Theme.mutedForeground : Theme.foreground)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var header: String {
+        guard confirming else { return "正在聆听" }
+        switch session.result?.outcome {
+        case .refined: return session.showsOriginal ? "识别结果 · 原文" : "识别结果 · 已整理"
+        case .notRefined: return "识别结果 · 未整理"
+        case .off, nil: return "识别结果 · 点按文字可编辑"
         }
     }
 
@@ -227,7 +257,7 @@ struct DictationOverlay: View {
 
     private var standHint: String {
         if confirming { return "确认后发送" }
-        if stage == .finalizing { return "正在识别…" }
+        if stage == .finalizing { return session.isRefining ? "正在整理…" : "正在识别…" }
         switch zone {
         case .cancel: return "松开取消"
         case .send: return "松开发送"

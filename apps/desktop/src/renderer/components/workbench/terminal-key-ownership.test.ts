@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { decideTerminalKeyOwner, type TerminalKeyEvent } from "./terminal-key-ownership";
+import { decideDictationKey, decideTerminalKeyOwner, type TerminalKeyEvent } from "./terminal-key-ownership";
 
 type Modifiers = { meta?: boolean; ctrl?: boolean; alt?: boolean; shift?: boolean };
 
@@ -83,4 +83,21 @@ test("⌘\\ 与 ⇧⌘\\（拆分）本来就在 ⌘ 那一档，归应用", () 
   assert.equal(decideTerminalKeyOwner(key("Backslash", { meta: true })), "app");
   assert.equal(decideTerminalKeyOwner(key("Backslash", { meta: true, shift: true })), "app");
   assert.equal(decideTerminalKeyOwner(key("IntlBackslash", { meta: true })), "app");
+});
+
+test("dictation keys: ⌥Space only with dictation configured, Esc while active, ⏎ / ⌘⏎ / ⇧⏎ in confirm", () => {
+  const idle = { available: true, active: false, confirming: false };
+  assert.equal(decideDictationKey(key("Space", { alt: true }), idle), "press");
+  assert.equal(decideDictationKey({ ...key("Space", { alt: true }), repeat: true }, idle), "swallow");
+  assert.equal(decideDictationKey(key("Space", { alt: true }), { ...idle, available: false }), null);
+  assert.equal(decideDictationKey(key("Space", { alt: true, shift: true }), idle), null);
+  assert.equal(decideDictationKey(key("KeyB", { alt: true }), idle), null);
+  assert.equal(decideDictationKey(key("Escape"), idle), null);
+  assert.equal(decideDictationKey(key("Enter"), idle), null);
+  const confirming = { available: true, active: true, confirming: true };
+  assert.equal(decideDictationKey(key("Escape"), confirming), "cancel");
+  assert.equal(decideDictationKey(key("Enter"), confirming), "send");
+  assert.equal(decideDictationKey(key("Enter", { meta: true }), confirming), "insert");
+  assert.equal(decideDictationKey(key("Enter", { shift: true }), confirming), "newline");
+  assert.equal(decideDictationKey(key("Enter", { ctrl: true }), confirming), null);
 });

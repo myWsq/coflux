@@ -38,6 +38,8 @@ mac:
   icon: build/AppIcon.icns
   extendInfo:
     CFBundleIconName: AppIcon
+    # Shown in the microphone permission prompt (plan 20261110-desktop-dictation).
+    NSMicrophoneUsageDescription: Coflux 使用麦克风，把你说的话转成文字输入到终端。
   extraResources:
     - from: build/Assets.car
       to: Assets.car

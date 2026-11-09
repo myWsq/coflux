@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, clipboard, dialog, Menu, protocol, safeStorage, session, shell, type BrowserWindow } from "electron";
+import { app, clipboard, dialog, Menu, net, protocol, safeStorage, session, shell, systemPreferences, type BrowserWindow, type WebContents } from "electron";
+import WebSocket from "ws";
 
 import type { DesktopCommand } from "../shared/desktop-bridge";
 import { IPC } from "../shared/ipc";
@@ -33,6 +34,10 @@ import { createBrowserHost } from "./browser-host";
 import { LoopbackTunnels } from "./loopback-tunnel";
 import { createScreenHost } from "./screen-host";
 import { registerWorkspaceFileIpc } from "./workspace-files";
+import { createDictationCredentials } from "./dictation-credentials";
+import { createDictationHost } from "./dictation-session";
+import type { SpeechSocket } from "./dictation-transcriber";
+import { isTrustedRendererUrl } from "./ipc-trust";
 import { DeviceScope } from "@coflux/protocol";
 
 // scheme 特权只能在 ready 之前注册一次：standard（有 host、相对路径可解析）+ secure（安全上下文，
@@ -187,14 +192,32 @@ if (!app.requestSingleInstanceLock()) {
     registerAppProtocol(RENDERER_ROOT);
     installOriginRewrite();
 
-    // 渲染层不需要任何浏览器权限：通知走主进程 Notification，不经 Web Notification API；
-    // 只放行全屏与剪贴板读写。其余（摄像头/麦克风/地理位置/...）一律拒绝。
-    // clipboard-read 是终端右键「粘贴」必需的（走 navigator.clipboard.readText()）；
-    // 不放行的话没有报错，只是静默什么都不发生。OSC 52 不在此列：52 号序列由渲染层自己的
-    // handler 消费，写入走主进程 Electron clipboard，查询一个字节都不回。
+    // The renderer needs almost no browser permission: notifications go through the main process's
+    // Notification, never the Web Notification API. Only full screen and clipboard read/write are
+    // allowed, plus one exception: the microphone for dictation in terminals (plan
+    // 20261110-desktop-dictation) — `media` is granted only for an audio-only request (no video)
+    // from the app's own renderer. Everything else (camera, geolocation, ...) is refused. Built-in
+    // browser guests live in their own partitions under browser-host.ts's handlers, untouched here.
+    // clipboard-read is required by the terminal's right-click 「粘贴」 (navigator.clipboard.readText());
+    // without it nothing fails loudly, it silently does nothing. OSC 52 is not part of this: the
+    // renderer's own handler consumes sequence 52, writes go through the main process's Electron
+    // clipboard, and a query is never answered with a single byte.
     const allowedPermissions = new Set(["fullscreen", "clipboard-sanitized-write", "clipboard-read"]);
-    session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(allowedPermissions.has(permission)));
-    session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
+    const isOwnRenderer = (contents: WebContents | null, url: string | undefined) =>
+      !!mainWindow && !mainWindow.isDestroyed() && (!contents || contents === mainWindow.webContents) && isTrustedRendererUrl(url, trusted);
+    session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+      if (permission === "media") {
+        const types = (details as { mediaTypes?: string[] }).mediaTypes ?? [];
+        const audioOnly = types.length > 0 && types.every((type) => type === "audio");
+        callback(audioOnly && isOwnRenderer(contents, details.requestingUrl));
+        return;
+      }
+      callback(allowedPermissions.has(permission));
+    });
+    session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+      if (permission === "media") return details.mediaType === "audio" && isOwnRenderer(contents, requestingOrigin);
+      return allowedPermissions.has(permission);
+    });
 
     const serverUrl = currentServerUrl();
     log.info("服务器地址", serverUrl);
@@ -206,6 +229,19 @@ if (!app.requestSingleInstanceLock()) {
       onError: (stage, error) => log.warn(`会话 token ${stage} 失败，按未登录处理`, error),
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
+
+    // Dictation (plan 20261110-desktop-dictation): the speech keys are fetched over a short control
+    // connection of this process and never leave it; the renderer gets text and outcomes only.
+    // The correction request goes through Chromium's network stack (system proxy included).
+    const dictationCredentials = createDictationCredentials({ serverUrl, token: tokenStore.read, log: (message) => log.warn(message) });
+    const dictation = createDictationHost({
+      credentials: dictationCredentials,
+      socket: (url, headers) => new WebSocket(url, { headers }) as unknown as SpeechSocket,
+      fetch: (url, init) => net.fetch(url, init),
+      send: (event) => sendToRenderer(IPC.dictationEvent, event),
+      log: (message) => log.warn(message),
+    });
+    app.once("will-quit", () => dictation.cancelAll());
 
     // Auto-update: the generic provider reads latest-mac.yml from the R2 download mirror (dl.coflux.dev/desktop)；状态变化广播给渲染层，
     // 版本准入被拒的状态页据此显示「需要更新」。quitAndInstall 前把 quitting 置位，close 钩子才放行关窗。
@@ -335,6 +371,8 @@ if (!app.requestSingleInstanceLock()) {
         if (localConnect) await localConnect;
         if (!await daemon.stopForExit("logout")) return false;
         nativeTransport?.setControl(false, true);
+        dictation.cancelAll();
+        dictationCredentials.clear();
         localAccount.logout(tokenStore.read());
         if (!tokenStore.clear()) throw new Error("无法清除本机登录凭据，请重试退出登录");
         // 本机已停止且 outbox 已持久化；断网不会阻止退出登录。
@@ -363,7 +401,11 @@ if (!app.requestSingleInstanceLock()) {
     // Browser sign-in (plan 20260923): loopback + PKCE + code exchange all stay in this process. The
     // token lands through the same store-and-reset path as the renderer's setSessionToken.
     const storeSessionToken = (token: string) => {
-      if (token !== tokenStore.read()) nativeTransport?.setControl(false, true);
+      if (token !== tokenStore.read()) {
+        nativeTransport?.setControl(false, true);
+        dictation.cancelAll();
+        dictationCredentials.clear();
+      }
       tokenStore.write(token);
     };
     const browserLogin = createBrowserLogin({
@@ -412,7 +454,12 @@ if (!app.requestSingleInstanceLock()) {
         startBrowserLogin: browserLogin.start,
         reopenBrowserLogin: browserLogin.reopen,
         cancelBrowserLogin: browserLogin.cancel,
-        clearSessionToken: () => { nativeTransport?.setControl(false, true); tokenStore.clear(); },
+        clearSessionToken: () => {
+          nativeTransport?.setControl(false, true);
+          dictation.cancelAll();
+          dictationCredentials.clear();
+          tokenStore.clear();
+        },
         // 渲染层主动拉取（账号菜单挂载时）顺带触发一次含 launchctl 的全量刷新：用户驱动、低频
         getDaemonState: () => {
           void daemon.refresh();
@@ -431,6 +478,20 @@ if (!app.requestSingleInstanceLock()) {
         testExecutorConnection: executor.testConnection,
         executorInbound: executor.inbound,
         executorChannel: executor.setChannel,
+        dictationStart: dictation.start,
+        dictationAudio: dictation.audio,
+        dictationFinish: dictation.finish,
+        dictationCancel: dictation.cancel,
+        // Asks TCC only while undecided; a denial is final until the user changes it in System Settings.
+        microphoneAccess: async () => {
+          if (process.platform !== "darwin") return "granted";
+          const status = systemPreferences.getMediaAccessStatus("microphone");
+          if (status === "granted") return "granted";
+          if (status !== "not-determined") return "denied";
+          return (await systemPreferences.askForMediaAccess("microphone")) ? "granted" : "denied";
+        },
+        openMicrophoneSettings: () => void shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
+        openSettings: () => sendCommand("open-settings"),
       },
       trusted,
     );
@@ -535,6 +596,7 @@ if (!app.requestSingleInstanceLock()) {
         setBadge: setDockBadge,
         resetBrowserHost: browserHost.reset,
         resetScreenHost: screenHost.reset,
+        resetDictation: dictation.cancelAll,
       },
       trusted,
     );
@@ -555,5 +617,7 @@ if (!app.requestSingleInstanceLock()) {
     // included) ends it in the page.
     mainWindow.on("leave-full-screen", () => sendToRenderer(IPC.screenEvent, { kind: "fullscreen", on: false }));
     mainWindow.on("enter-full-screen", () => sendToRenderer(IPC.screenEvent, { kind: "fullscreen", on: true }));
+    // Closing the window only hides it; a dictation must not keep running behind a hidden window.
+    mainWindow.on("hide", () => dictation.cancelAll());
   });
 }

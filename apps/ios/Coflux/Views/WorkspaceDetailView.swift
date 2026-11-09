@@ -1140,10 +1140,10 @@ struct WorkspaceDetailView: View {
         }
         dictationStage = .finalizing
         Task {
-            let text = await session.finish()
+            let result = await session.finish()
             guard dictationSession === session else { return }
             dictationStage = .settled
-            if text.isEmpty {
+            if result.raw.isEmpty {
                 switch session.phase {
                 case .permissionDenied, .unavailable, .failed:
                     return  // 留驻示错/引导，点任意处关闭
@@ -1154,16 +1154,16 @@ struct WorkspaceDetailView: View {
             }
             if zone == .send {
                 closeDictationOverlay()
-                deliver(text)
+                deliver(result.preferred)  // the corrected text when accepted
             }
             // zone == .none：停在确认态，等用户点发送 / 点草稿编辑 / 点取消
         }
     }
 
-    /// 确认态点「发送」：终稿已落定，直接取当前文本落地。
+    /// 确认态点「发送」：终稿已落定，直接取屏上那一版（整理后或原文）落地。
     private func sendDictation() {
         guard let session = dictationSession else { return }
-        let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = session.shownText
         closeDictationOverlay()
         deliver(text)
     }
@@ -1171,7 +1171,7 @@ struct WorkspaceDetailView: View {
     /// 确认态点草稿文字：落 draft 开成文层继续编辑。
     private func editDictation() {
         guard let session = dictationSession else { return }
-        let text = session.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = session.shownText
         closeDictationOverlay()
         draft = text
         setComposing(true)

@@ -10,5 +10,9 @@
   <true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
+  <!-- Voice input into terminals (plan 20261110-desktop-dictation): under the hardened runtime the
+       microphone is unavailable without this, whatever TCC says. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
 </dict>
 </plist>
