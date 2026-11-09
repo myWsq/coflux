@@ -340,3 +340,12 @@ Desktop-only; ships with the next `v*` release. No server deployment, migration,
 change. Release notes should mention that the sidebar now opens with projects collapsed (one-time
 change of the user's view) and the new ⌘⇧A 「下一个待处理」 shortcut. UI walkthrough is by the user;
 Claude does not verify frontend behaviour.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-09
+- Mode: subagent(opus), one work package (milestones 2 and 3 both depend on milestone 1 and share `workbench.tsx`); no revision rounds
+- Commits: `f70cb6ed..7b27d9dd`
+- Deviations: the tree row's hover × keeps its pre-existing native `title="删除工作区"` (the brief required the tree row unchanged); the project row's native `title` was replaced by a `Tooltip` as planned
+- Follow-ups: the UI walkthrough (`pnpm dev:desktop:prod`) is the user's; a directory workspace whose agent waits is not reached by ⌘⇧A (see Maintenance notes)
+- Verification: `pnpm -C apps/desktop typecheck`, `lint`, `build` exit 0; `test` 587/587 (one unrelated timing flake in `src/main/desktop-account.test.ts` on the first run, green on rerun and three isolated reruns)
