@@ -252,10 +252,16 @@ async function submitForBetaReview(asc, buildId, groups, dryRun) {
     console.log("    beta review: not needed, every group is internal");
     return;
   }
+  // Ask first: a build already in review answers a second submission with 422
+  // INVALID_QC_STATE (seen 2026-11-10), not only with the 409 handled below.
+  const submission = await asc.get(`/v1/builds/${buildId}/betaAppReviewSubmission`).catch(() => null);
+  const state = submission?.data?.attributes?.betaReviewState;
+  if (state) {
+    console.log(`    beta review: already ${state}`);
+    return;
+  }
   if (dryRun) {
-    const submission = await asc.get(`/v1/builds/${buildId}/betaAppReviewSubmission`).catch(() => null);
-    const state = submission?.data?.attributes?.betaReviewState;
-    console.log(state ? `    beta review: already ${state}` : "    beta review: would submit (an external group is in the list)");
+    console.log("    beta review: would submit (an external group is in the list)");
     return;
   }
   try {
@@ -290,7 +296,9 @@ const whatsNew = (args.whatsNew ?? defaultWhatsNew(await previousUploadDate(asc,
 await writeWhatsNew(asc, build.id, whatsNew, args.dryRun);
 
 const groups = await resolveGroups(asc, app.id, args.groups);
-await addToGroups(asc, build.id, groups, args.dryRun);
+// Review first: App Store Connect answers linking a build that was never submitted for beta
+// review to an external group with a misleading 404 "no resource of type 'builds'" (2026-11-10).
 if (args.submitReview) await submitForBetaReview(asc, build.id, groups, args.dryRun);
+await addToGroups(asc, build.id, groups, args.dryRun);
 
 console.log(args.dryRun ? `==> dry run only, nothing was changed` : `==> build ${args.build} is live on TestFlight`);

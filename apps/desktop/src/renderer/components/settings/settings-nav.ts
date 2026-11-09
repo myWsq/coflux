@@ -38,7 +38,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "speech",
     label: "语音识别",
-    description: "iPhone 长按说话所用的豆包语音识别 2.0（火山方舟 Agent Plan）API Key。Key 存在账号上，账号下的所有设备共用。",
+    description: "iPhone 长按说话所用的语音识别服务：豆包 Seed-ASR 或 OpenAI Realtime，各自的 Base URL、模型与 API Key。设置存在账号上，账号下的所有设备共用。",
     group: 1,
   },
   {

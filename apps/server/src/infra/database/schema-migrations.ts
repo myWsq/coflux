@@ -1347,6 +1347,31 @@ CREATE TABLE coflux.account_speech_keys (
 );
 `;
 
+/** Version 12 (plan 20261109-speech-providers): one dictation slot per (account, provider) — base URL
+ * and model as typed (empty = the client's default) plus an optional key encrypted with the executor
+ * secret keys — and the account's provider in use (no row = 'doubao'). Every stored key moves into
+ * its account's Doubao slot and the old table is dropped. **One-way**: a server rolled back to a build
+ * before this migration finds no `account_speech_keys` table. */
+const ACCOUNT_SPEECH_PROVIDERS_SCHEMA_SQL = `
+CREATE TABLE coflux.account_speech_providers (
+  account_id TEXT NOT NULL REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL CHECK (provider IN ('doubao', 'openai')),
+  base_url TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  api_key_ciphertext TEXT,
+  updated_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (account_id, provider)
+);
+CREATE TABLE coflux.account_speech_settings (
+  account_id TEXT PRIMARY KEY REFERENCES coflux.accounts(id) ON DELETE CASCADE,
+  active_provider TEXT NOT NULL CHECK (active_provider IN ('doubao', 'openai')),
+  updated_at DOUBLE PRECISION NOT NULL
+);
+INSERT INTO coflux.account_speech_providers (account_id, provider, base_url, model, api_key_ciphertext, updated_at)
+  SELECT account_id, 'doubao', '', '', api_key_ciphertext, updated_at FROM coflux.account_speech_keys;
+DROP TABLE coflux.account_speech_keys;
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1425,6 +1450,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "account_speech_keys",
     definition: ACCOUNT_SPEECH_KEYS_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_KEYS_SCHEMA_SQL); },
+  },
+  {
+    version: 12,
+    name: "account_speech_providers",
+    definition: ACCOUNT_SPEECH_PROVIDERS_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_PROVIDERS_SCHEMA_SQL); },
   },
 ];
 

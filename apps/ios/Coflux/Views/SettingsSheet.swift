@@ -41,7 +41,7 @@ struct SettingsSheet: View {
                         }
                     }
                 } footer: {
-                    Text("长按输入键说话时使用的豆包语音识别。")
+                    Text("长按输入键说话时使用的语音识别服务。")
                 }
                 .listRowBackground(Theme.secondarySurface)
 
@@ -87,9 +87,9 @@ struct SettingsSheet: View {
         }
     }
 
+    /// The provider in use, or 未配置 when its key is missing.
     private var speechStatus: String {
-        guard client.speechKeySupported else { return "" }
-        guard let status = client.speechKeyStatus else { return "" }
-        return status.configured ? "已配置" : "未配置"
+        guard client.speechConfigSupported, let config = client.speechConfig else { return "" }
+        return config[config.active].keyConfigured ? config.active.displayName : "未配置"
     }
 }

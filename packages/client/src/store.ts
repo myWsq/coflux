@@ -5,6 +5,7 @@ import {
   CONTROL_PROTOCOL_VERSION,
   SecretAnswerKind,
   SecretAnswerStatus,
+  SpeechProvider,
   type AccountNotification,
   type Annotation,
   type AnnotationPut,
@@ -273,14 +274,92 @@ export type AccountAgentSettings = Readonly<Record<string, AccountAgentSetting>>
  * not support it, the configuration of this connection has not arrived, disconnected, timed out). */
 export type AgentSettingWriteResult = { ok: true } | { ok: false; error: string };
 const AGENT_SETTING_WRITE_TIMEOUT_MS = 15_000;
-/** The account's dictation API key as this client sees it (plan 20261108-ios-seed-asr): whether one is
- * stored and when it was last written (ms epoch, center clock). Never the key itself. */
-export type SpeechKeyStatus = { configured: boolean; updatedAt: number };
-/** Answer to `setSpeechKey`: the center accepted the write (its broadcast has already replaced
- * `speechKeyStatus`), or it failed — refused by the center, or locally (not connected, the center does
- * not support it, disconnected, timed out). */
-export type SpeechKeyWriteResult = { ok: true } | { ok: false; error: string };
-const SPEECH_KEY_WRITE_TIMEOUT_MS = 15_000;
+/** A dictation provider (plan 20261109-speech-providers). */
+export type SpeechProviderId = "doubao" | "openai";
+/** Every provider, in wire enum order. */
+export const SPEECH_PROVIDER_IDS: readonly SpeechProviderId[] = ["doubao", "openai"];
+/** What each provider is called and what an empty base URL or model resolves to. The center stores
+ * exactly what the user typed and knows none of this. */
+export const SPEECH_PROVIDER_DEFAULTS: Readonly<
+  Record<SpeechProviderId, { displayName: string; shortName: string; baseUrl: string; model: string }>
+> = Object.freeze({
+  doubao: {
+    displayName: "豆包 Seed-ASR",
+    shortName: "豆包",
+    baseUrl: "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_async",
+    model: "volc.seedasr.sauc.duration",
+  },
+  openai: {
+    displayName: "OpenAI Realtime",
+    shortName: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-live-transcribe",
+  },
+});
+/** One provider's slot as this client sees it: base URL and model as stored (empty = the default),
+ * whether a key is stored and when the slot was last written (ms epoch, center clock, 0 = never).
+ * Never the key itself. */
+export type SpeechProviderState = { baseUrl: string; model: string; keyConfigured: boolean; updatedAt: number };
+/** The account's dictation configuration: the provider in use and both slots. */
+export type SpeechConfig = { active: SpeechProviderId; providers: Readonly<Record<SpeechProviderId, SpeechProviderState>> };
+/** What a slot write does with its key: keep the stored one, replace it, or remove it. */
+export type SpeechKeyChange = { kind: "keep" } | { kind: "replace"; apiKey: string } | { kind: "clear" };
+/** Answer to `setSpeechProviderConfig` / `setSpeechActiveProvider`: the center accepted the write
+ * (its broadcast has already replaced `speechConfig`), or it failed — refused by the center, or
+ * locally (not connected, the center does not support it, disconnected, timed out). */
+export type SpeechWriteResult = { ok: true } | { ok: false; error: string };
+const SPEECH_WRITE_TIMEOUT_MS = 15_000;
+const MAX_SPEECH_BASE_URL_CHARS = 512;
+const MAX_SPEECH_MODEL_CHARS = 128;
+const MAX_SPEECH_KEY_CHARS = 256;
+const SPEECH_INVALID_CHARS = /[\s\u0000-\u001f\u007f]/u;
+const SPEECH_DOUBAO_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SPEECH_OPENAI_MODEL_PATTERN = /^gpt-live-transcribe(-[A-Za-z0-9._-]+)?$/;
+const SPEECH_PROVIDER_WIRE: Readonly<Record<SpeechProviderId, SpeechProvider>> = {
+  doubao: SpeechProvider.DOUBAO,
+  openai: SpeechProvider.OPENAI,
+};
+function speechProviderId(wire: SpeechProvider): SpeechProviderId | undefined {
+  if (wire === SpeechProvider.DOUBAO) return "doubao";
+  if (wire === SpeechProvider.OPENAI) return "openai";
+  return undefined;
+}
+/**
+ * The first problem with one provider's form input, mirroring the center's rules for immediate
+ * feedback (the center stays the authority), or undefined when it can be sent. Values are checked
+ * trimmed; an empty base URL or model means the default, an empty key means "no new key".
+ */
+export function speechConfigInputError(
+  provider: SpeechProviderId,
+  input: { baseUrl: string; model: string; apiKey: string },
+): string | undefined {
+  const baseUrl = input.baseUrl.trim();
+  const model = input.model.trim();
+  const apiKey = input.apiKey.trim();
+  if (baseUrl !== "") {
+    const scheme = provider === "doubao" ? "wss:" : "https:";
+    if (baseUrl.length > MAX_SPEECH_BASE_URL_CHARS) return `Base URL 不能超过 ${MAX_SPEECH_BASE_URL_CHARS} 个字符`;
+    if (SPEECH_INVALID_CHARS.test(baseUrl)) return "Base URL 不能包含空白或控制字符";
+    const schemeError = `Base URL 必须是完整的 ${scheme}// 地址`;
+    let parsed: URL;
+    try {
+      parsed = new URL(baseUrl);
+    } catch {
+      return schemeError;
+    }
+    if (parsed.protocol !== scheme || parsed.hostname === "") return schemeError;
+    if (parsed.username !== "" || parsed.password !== "") return "Base URL 不能包含用户名或密码";
+    if (baseUrl.includes("?") || baseUrl.includes("#")) return "Base URL 不能包含查询参数或片段";
+  }
+  if (model !== "") {
+    if (model.length > MAX_SPEECH_MODEL_CHARS) return `模型不能超过 ${MAX_SPEECH_MODEL_CHARS} 个字符`;
+    if (provider === "openai" && !SPEECH_OPENAI_MODEL_PATTERN.test(model)) return "OpenAI 只支持 gpt-live-transcribe 系列的实时转写模型";
+    if (provider === "doubao" && !SPEECH_DOUBAO_MODEL_PATTERN.test(model)) return "模型只能包含字母、数字、点、下划线和连字符，且以字母或数字开头";
+  }
+  if (apiKey.length > MAX_SPEECH_KEY_CHARS) return `API Key 不能超过 ${MAX_SPEECH_KEY_CHARS} 个字符`;
+  if (SPEECH_INVALID_CHARS.test(apiKey)) return "API Key 不能包含空白或控制字符";
+  return undefined;
+}
 const EMPTY_AGENT_SETTINGS: AccountAgentSettings = Object.freeze({});
 
 /** 已退出终端的最后输出来源（plan 097）：snapshot / checkpoint = 规范化 ANSI 屏幕（分别来自 daemon 当前画面与
@@ -495,13 +574,14 @@ export type CofluxState = {
    * 20261030-project-archive). False before the first authOk and against an older center, which
    * only knows project removal. */
   projectArchiveSupported: boolean;
-  /** The center of the current connection stores the account's dictation key (`AuthOk.speech_key`,
-   * plan 20261108-ios-seed-asr). False before the first authOk and against an older center. */
-  speechKeySupported: boolean;
-  /** Whether the account has a dictation key, replaced by every `speechKeyStatus`. Null until the
-   * first status arrives. Kept across disconnects like `agentSettings`, but never saved with the
-   * offline catalog; reset when the account changes. The desktop never holds the key itself. */
-  speechKeyStatus: SpeechKeyStatus | null;
+  /** The center of the current connection stores per-provider dictation configurations
+   * (`AuthOk.speech_providers`, plan 20261109-speech-providers). False before the first authOk and
+   * against an older center. */
+  speechConfigSupported: boolean;
+  /** The account's dictation configuration, replaced by every `speechConfigStatus` without an error.
+   * Null until the first status arrives. Kept across disconnects like `agentSettings`, but never saved
+   * with the offline catalog; reset when the account changes. The desktop never holds a key. */
+  speechConfig: SpeechConfig | null;
   lastError: ClientError | null;
   snapshotRevision: number;
 };
@@ -711,22 +791,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
   // The account `agentSettings` belongs to: a different account must never see, or launch, them.
   let agentSettingsAccount = "";
 
-  // Speech-key writes in flight (plan 20261108-ios-seed-asr), with the same lifecycle as the
-  // agent-setting writes above.
-  let speechKeyRequest = 0;
-  const pendingSpeechKeyWrites = new Map<string, { resolve: (result: SpeechKeyWriteResult) => void; timer: ReturnType<typeof setTimeout> }>();
-  function settleSpeechKeyWrite(requestId: string, result: SpeechKeyWriteResult): void {
-    const pending = pendingSpeechKeyWrites.get(requestId);
+  // Speech-configuration writes in flight (plan 20261109-speech-providers), with the same lifecycle
+  // as the agent-setting writes above.
+  let speechRequest = 0;
+  const pendingSpeechWrites = new Map<string, { resolve: (result: SpeechWriteResult) => void; timer: ReturnType<typeof setTimeout> }>();
+  function settleSpeechWrite(requestId: string, result: SpeechWriteResult): void {
+    const pending = pendingSpeechWrites.get(requestId);
     if (!pending) return;
-    pendingSpeechKeyWrites.delete(requestId);
+    pendingSpeechWrites.delete(requestId);
     clearTimeout(pending.timer);
     pending.resolve(result);
   }
-  function failSpeechKeyWrites(error: string): void {
-    for (const requestId of [...pendingSpeechKeyWrites.keys()]) settleSpeechKeyWrite(requestId, { ok: false, error });
+  function failSpeechWrites(error: string): void {
+    for (const requestId of [...pendingSpeechWrites.keys()]) settleSpeechWrite(requestId, { ok: false, error });
   }
-  // The account `speechKeyStatus` belongs to.
-  let speechKeyAccount = "";
+  // The account `speechConfig` belongs to.
+  let speechConfigAccount = "";
 
   // Directory-workspace ensures in flight (plan 20260929-remote-desktop), keyed by request id like the join keys.
   let directoryWorkspaceRequest = 0;
@@ -771,8 +851,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     agentSettingsSupported: false,
     agentSettingsReceived: false,
     projectArchiveSupported: false,
-    speechKeySupported: false,
-    speechKeyStatus: null,
+    speechConfigSupported: false,
+    speechConfig: null,
     notificationInbox: emptyNotificationInbox(),
     lastError: null,
     snapshotRevision: 0,
@@ -1159,7 +1239,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // The configuration stays (the offline menu uses it); it just is no longer this connection's.
         store.setState({ agentSettingsReceived: false });
         failAgentSettingWrites("与服务器的连接已断开，修改没有保存");
-        failSpeechKeyWrites("与服务器的连接已断开，修改没有保存");
+        failSpeechWrites("与服务器的连接已断开，修改没有保存");
         // TCP/WS transport 断开不等于账号授权已撤销，也不等于 worker 那条独立控制 WS 已断。
         // Router 会立即禁用新 rendezvous/高权限能力，但给既有 remote session lane 一个有界宽限。
         deviceRouter.setControlDisconnected();
@@ -1434,13 +1514,13 @@ export function createCofluxClient(options: CofluxClientOptions) {
         }
         store.setState({ agentSettingsSupported: value.agentSettings, agentSettingsReceived: false });
         store.setState({ projectArchiveSupported: value.projectArchive });
-        // Speech key: the status arrives after the subscribe snapshot; the previous one stays until
-        // then unless it belongs to another account or this center does not store the key.
-        if (speechKeyAccount !== value.accountId || !value.speechKey) {
-          speechKeyAccount = value.accountId;
-          store.setState({ speechKeyStatus: null });
+        // Speech configuration: the status arrives after the subscribe snapshot; the previous one stays
+        // until then unless it belongs to another account or this center does not store it.
+        if (speechConfigAccount !== value.accountId || !value.speechProviders) {
+          speechConfigAccount = value.accountId;
+          store.setState({ speechConfig: null });
         }
-        store.setState({ speechKeySupported: value.speechKey });
+        store.setState({ speechConfigSupported: value.speechProviders });
         // Terminal content: fetched through TaskRead when the center serves metadata, else taken
         // from the checkpoints it pushes (plan 20261010-terminal-checkpoint-energy).
         sessionMetadataSupported = value.sessionMetadata;
@@ -1471,9 +1551,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         agentSettingsAccount = "";
         failAgentSettingWrites("登录已失效，修改没有保存");
         store.setState({ agentSettings: EMPTY_AGENT_SETTINGS, agentSettingsSupported: false, agentSettingsReceived: false });
-        speechKeyAccount = "";
-        failSpeechKeyWrites("登录已失效，修改没有保存");
-        store.setState({ speechKeySupported: false, speechKeyStatus: null });
+        speechConfigAccount = "";
+        failSpeechWrites("登录已失效，修改没有保存");
+        store.setState({ speechConfigSupported: false, speechConfig: null });
         store.setState({ projectArchiveSupported: false });
         // Show the server's own reason. This branch is reached by an expired session token, a
         // rate-limited address and an obsolete bundle just as much as by wrong credentials, and
@@ -1495,9 +1575,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
         // 不是可重试的断线；进入专用状态页（非认证失败，不设 loginError——auth-failed 展示面语义是
         // "账号/密码错了"，混用会误导用户），由 app 触发自动更新检查。
         shouldRetry = false;
-        speechKeyAccount = "";
-        failSpeechKeyWrites("客户端版本过旧，修改没有保存");
-        store.setState({ authState: "outdated", speechKeySupported: false, speechKeyStatus: null });
+        speechConfigAccount = "";
+        failSpeechWrites("客户端版本过旧，修改没有保存");
+        store.setState({ authState: "outdated", speechConfigSupported: false, speechConfig: null });
         break;
       }
       case "notificationPage": {
@@ -1870,15 +1950,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
         if (value.requestId) settleAgentSettingWrite(value.requestId, { ok: true });
         break;
       }
-      case "speechKeyStatus": {
+      case "speechConfigStatus": {
         const value = payload.value;
-        // A rejected write: answered to the writer only; its configured/updatedAt mean nothing.
+        // A rejected write: answered to the writer only; its other fields mean nothing.
         if (value.error) {
-          settleSpeechKeyWrite(value.requestId, { ok: false, error: value.error });
+          settleSpeechWrite(value.requestId, { ok: false, error: value.error });
           break;
         }
-        store.setState({ speechKeyStatus: { configured: value.configured, updatedAt: value.updatedAt } });
-        if (value.requestId) settleSpeechKeyWrite(value.requestId, { ok: true });
+        const empty: SpeechProviderState = { baseUrl: "", model: "", keyConfigured: false, updatedAt: 0 };
+        const providers: Record<SpeechProviderId, SpeechProviderState> = { doubao: empty, openai: empty };
+        for (const entry of value.providers) {
+          const id = speechProviderId(entry.provider);
+          if (id) providers[id] = { baseUrl: entry.baseUrl, model: entry.model, keyConfigured: entry.keyConfigured, updatedAt: entry.updatedAt };
+        }
+        store.setState({ speechConfig: { active: speechProviderId(value.active) ?? "doubao", providers } });
+        // After the state: a writer awaiting its result sees the configuration it produced.
+        if (value.requestId) settleSpeechWrite(value.requestId, { ok: true });
         break;
       }
       case "directoryWorkspaceEnsured": {
@@ -1939,22 +2026,48 @@ export function createCofluxClient(options: CofluxClientOptions) {
     });
   }
 
-  /**
-   * Replace (or, with an empty string, clear) the account's dictation API key (plan
-   * 20261108-ios-seed-asr). Only while connected to a center that stores it; otherwise it fails at
-   * once. On success every subscribed client of the account has received the new status. The key is
-   * sent once and never kept here; failures never touch lastError.
-   */
-  function setSpeechKey(apiKey: string): Promise<SpeechKeyWriteResult> {
+  /** Send one speech-configuration write and resolve when its status (or refusal) arrives. Only while
+   * connected to a center that stores provider configurations; otherwise it fails at once. Failures
+   * never touch lastError. */
+  function sendSpeechWrite(build: (requestId: string) => ClientToServerPayload): Promise<SpeechWriteResult> {
     const state = store.getState();
     if (!controlAuthenticated) return Promise.resolve({ ok: false, error: "与服务器的连接未就绪，修改没有保存" });
-    if (!state.speechKeySupported) return Promise.resolve({ ok: false, error: "服务器版本过旧，不支持保存语音识别 Key" });
-    const requestId = `${notificationRequestPrefix}-speech-${++speechKeyRequest}`;
-    return new Promise<SpeechKeyWriteResult>((resolve) => {
-      const timer = setTimeout(() => settleSpeechKeyWrite(requestId, { ok: false, error: "保存超时，修改没有保存" }), SPEECH_KEY_WRITE_TIMEOUT_MS);
-      pendingSpeechKeyWrites.set(requestId, { resolve, timer });
-      send({ case: "speechKeySet", value: { requestId, apiKey: apiKey.trim() } });
+    if (!state.speechConfigSupported) return Promise.resolve({ ok: false, error: "服务器版本过旧，不支持保存语音识别设置" });
+    const requestId = `${notificationRequestPrefix}-speech-${++speechRequest}`;
+    return new Promise<SpeechWriteResult>((resolve) => {
+      const timer = setTimeout(() => settleSpeechWrite(requestId, { ok: false, error: "保存超时，修改没有保存" }), SPEECH_WRITE_TIMEOUT_MS);
+      pendingSpeechWrites.set(requestId, { resolve, timer });
+      send(build(requestId));
     });
+  }
+
+  /**
+   * Replace one provider's base URL and model (as typed; empty = the default) and keep, replace or
+   * clear its key (plan 20261109-speech-providers). The other provider is untouched. On success every
+   * subscribed client of the account has received the new configuration. A new key is sent once and
+   * never kept here.
+   */
+  function setSpeechProviderConfig(
+    provider: SpeechProviderId,
+    config: { baseUrl: string; model: string; key: SpeechKeyChange },
+  ): Promise<SpeechWriteResult> {
+    const apiKey = config.key.kind === "replace" ? config.key.apiKey.trim() : "";
+    return sendSpeechWrite((requestId) => ({
+      case: "speechConfigSet",
+      value: {
+        requestId,
+        provider: SPEECH_PROVIDER_WIRE[provider],
+        baseUrl: config.baseUrl.trim(),
+        model: config.model.trim(),
+        apiKey,
+        clearApiKey: config.key.kind === "clear",
+      },
+    }));
+  }
+
+  /** Choose the account's provider in use (plan 20261109-speech-providers); one without a key is allowed. */
+  function setSpeechActiveProvider(provider: SpeechProviderId): Promise<SpeechWriteResult> {
+    return sendSpeechWrite((requestId) => ({ case: "speechActiveSet", value: { requestId, provider: SPEECH_PROVIDER_WIRE[provider] } }));
   }
 
   /**
@@ -2014,8 +2127,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     failJoinKeys("已登出");
     failAgentSettingWrites("已登出");
     agentSettingsAccount = "";
-    failSpeechKeyWrites("已登出");
-    speechKeyAccount = "";
+    failSpeechWrites("已登出");
+    speechConfigAccount = "";
     pendingTaskRemovals.clear();
     clearRemovals();
     clearOfflineTimer();
@@ -2048,8 +2161,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
       agentSettingsSupported: false,
       agentSettingsReceived: false,
       projectArchiveSupported: false,
-      speechKeySupported: false,
-      speechKeyStatus: null,
+      speechConfigSupported: false,
+      speechConfig: null,
     });
   }
 
@@ -2440,7 +2553,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     settleDeviceAuthorize({ ok: false, error: "客户端已断开" });
     failJoinKeys("客户端已断开");
     failAgentSettingWrites("客户端已断开");
-    failSpeechKeyWrites("客户端已断开");
+    failSpeechWrites("客户端已断开");
     clearRemovals();
     clearOfflineTimer();
     deviceRouter.destroy();
@@ -2514,7 +2627,8 @@ export function createCofluxClient(options: CofluxClientOptions) {
     authorizeDevice,
     createDeviceJoinKey,
     setAgentSetting,
-    setSpeechKey,
+    setSpeechProviderConfig,
+    setSpeechActiveProvider,
     ensureDirectoryWorkspace,
     holdsTaskTerminal,
     typeIntoHeldTerminal,

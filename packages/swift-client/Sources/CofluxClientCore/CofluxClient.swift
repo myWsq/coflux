@@ -126,12 +126,14 @@ public final class CofluxClient {
     /// empty set from the center, not as a client-side clear.
     public private(set) var secretRequests: [String: SecretRequestInfo] = [:]
 
-    /// The centre of the current connection stores the account's dictation key (`AuthOk.speech_key`,
-    /// plan 20261108-ios-seed-asr). False before the first authOk and against an older centre.
-    public private(set) var speechKeySupported = false
-    /// Whether the account has a dictation key; nil until the first status arrives. Kept across
-    /// disconnects (as the TS store does), reset on logout, auth error and account change.
-    public private(set) var speechKeyStatus: SpeechKeyStatus?
+    /// The centre of the current connection stores per-provider dictation configurations
+    /// (`AuthOk.speech_providers`, plan 20261109-speech-providers). False before the first authOk and
+    /// against an older centre.
+    public private(set) var speechConfigSupported = false
+    /// The account's dictation configuration, replaced by every `speechConfigStatus` without an
+    /// error; nil until the first status arrives. Kept across disconnects (as the TS store does),
+    /// reset on logout, auth error and account change. Never a key.
+    public private(set) var speechConfig: SpeechConfig?
 
     /// The pending secret requests of one terminal, oldest first.
     public func pendingSecretRequests(taskID: String) -> [SecretRequestInfo] {
@@ -192,11 +194,12 @@ public final class CofluxClient {
     }
     public private(set) var deviceTransports: [String: DeviceTransportInfo] = [:]
 
-    /// Control-plane requests answered by `request_id` (speech-key write and fetch). Each one settles
-    /// exactly once: from the centre's answer, its timeout, cancellation, or the connection ending.
+    /// Control-plane requests answered by `request_id` (speech-configuration writes and credential
+    /// fetches). Each one settles exactly once: from the centre's answer, its timeout, cancellation,
+    /// or the connection ending.
     private enum ControlReply {
-        case speechKeyStatus(Coflux_V1_SpeechKeyStatus)
-        case speechKeyValue(Coflux_V1_SpeechKeyValue)
+        case speechConfigStatus(Coflux_V1_SpeechConfigStatus)
+        case speechCredentials(Coflux_V1_SpeechCredentials)
     }
     private struct ControlRequestWaiter {
         let continuation: CheckedContinuation<ControlReply, any Error>
@@ -206,9 +209,10 @@ public final class CofluxClient {
     private var controlRequestSequence = 0
     /// Same bound as the TS store's write timeouts.
     private static let controlRequestTimeout: Duration = .seconds(15)
-    /// The fetched dictation key (D8), memory only, valid while `speechKeyStatus.updatedAt` equals
-    /// `updatedAt`. Never written to disk or the keychain.
-    private var cachedSpeechKey: (key: String, updatedAt: Double)?
+    /// Fetched credentials per provider (plan 20261109-speech-providers D7), memory only, valid while
+    /// that provider's slot in `speechConfig` is unchanged; dropped by any change of that slot, by
+    /// logout and by account change. Never written to disk or the keychain.
+    private var cachedSpeechCredentials: [SpeechProviderID: (credentials: SpeechCredentials, slot: SpeechProviderState)] = [:]
 
     private let configuration: ClientConfiguration
     private let transport: any Transport
@@ -341,7 +345,7 @@ public final class CofluxClient {
         clearAttachIndicators()
         resetPendingTaskRemovals()
         failControlRequests("已登出")
-        resetSpeechKeyState()
+        resetSpeechState()
         accountID = nil
         loginName = ""
         shouldRetry = false
@@ -558,10 +562,10 @@ public final class CofluxClient {
             watchdogTask?.cancel()
             watchdogTask = nil
             if accountID != nil && accountID != value.accountID { resetPendingTaskRemovals() }
-            // The previous status and any fetched key belong to another account, or this centre
-            // does not store the key at all.
-            if accountID != value.accountID || !value.speechKey { resetSpeechKeyState() }
-            speechKeySupported = value.speechKey
+            // The previous configuration and any fetched credentials belong to another account, or
+            // this centre does not store provider configurations at all.
+            if accountID != value.accountID || !value.speechProviders { resetSpeechState() }
+            speechConfigSupported = value.speechProviders
             accountID = value.accountID.isEmpty ? nil : value.accountID
             loginName = value.hasLoginName ? value.loginName : ""
             deviceRouter.setAccountID(accountID)
@@ -588,7 +592,7 @@ public final class CofluxClient {
         case .authError(let value):
             clearAttachIndicators()
             resetPendingTaskRemovals()
-            resetSpeechKeyState()
+            resetSpeechState()
             accountID = nil
             loginName = ""
             deviceRouter.setAccountID(nil)
@@ -613,7 +617,7 @@ public final class CofluxClient {
 
         case .clientOutdated:
             clearAttachIndicators()
-            speechKeySupported = false
+            speechConfigSupported = false
             deviceRouter.setAccountID(nil)
             shouldRetry = false
             controlAuthenticated = false
@@ -748,17 +752,13 @@ public final class CofluxClient {
                 secretRequests[request.requestID] = SecretRequestInfo(daemonID: value.daemonID, request: request)
             }
 
-        case .speechKeyStatus(let value):
-            // A rejected write: answered to the writer only; its configured / updatedAt mean nothing.
-            if value.error.isEmpty {
-                let next = SpeechKeyStatus(configured: value.configured, updatedAt: value.updatedAt)
-                if next != speechKeyStatus { cachedSpeechKey = nil }
-                speechKeyStatus = next
-            }
-            if !value.requestID.isEmpty { settleControlRequest(value.requestID, .success(.speechKeyStatus(value))) }
+        case .speechConfigStatus(let value):
+            // A rejected write: answered to the writer only; its other fields mean nothing.
+            if value.error.isEmpty { applySpeechConfigStatus(value) }
+            if !value.requestID.isEmpty { settleControlRequest(value.requestID, .success(.speechConfigStatus(value))) }
 
-        case .speechKeyValue(let value):
-            settleControlRequest(value.requestID, .success(.speechKeyValue(value)))
+        case .speechCredentials(let value):
+            settleControlRequest(value.requestID, .success(.speechCredentials(value)))
 
         case .error(let value):
             clearAttachIndicators()
@@ -1143,61 +1143,134 @@ public final class CofluxClient {
         return try await deviceRouter.execute(daemonID: workspace.daemonID, workspaceID: workspaceID, command: command, args: args)
     }
 
-    // MARK: - Speech key (plan 20261108-ios-seed-asr)
+    // MARK: - Speech configuration (plan 20261109-speech-providers)
 
-    /// Replace (or, with an empty string, clear) the account's dictation key. Fails at once when not
-    /// connected or the centre does not store the key; never touches `lastError`.
-    public func setSpeechKey(_ apiKey: String) async -> SpeechKeyWriteResult {
+    /// Replace one provider's base URL and model (as typed; empty = the default) and keep, replace or
+    /// clear its key. The other provider is untouched. Fails at once when not connected or the centre
+    /// does not store provider configurations; never touches `lastError`. A new key is sent once and
+    /// never kept here.
+    public func setSpeechProviderConfig(
+        _ provider: SpeechProviderID,
+        baseURL: String,
+        model: String,
+        key: SpeechKeyChange
+    ) async -> SpeechWriteResult {
+        var set = Coflux_V1_SpeechConfigSet()
+        set.provider = Self.wireProvider(provider)
+        set.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        set.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch key {
+        case .keep: break
+        case .replace(let apiKey): set.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .clear: set.clearApiKey_p = true
+        }
+        let request = set
+        return await speechWrite { requestID in
+            var payload = request
+            payload.requestID = requestID
+            return .speechConfigSet(payload)
+        }
+    }
+
+    /// Choose the account's provider in use; one without a key is allowed.
+    public func setSpeechActiveProvider(_ provider: SpeechProviderID) async -> SpeechWriteResult {
+        await speechWrite { requestID in
+            var set = Coflux_V1_SpeechActiveSet()
+            set.requestID = requestID
+            set.provider = Self.wireProvider(provider)
+            return .speechActiveSet(set)
+        }
+    }
+
+    /// One named provider's credentials — not "the active one" — with base URL and model resolved to
+    /// the provider's defaults when stored empty; an empty `apiKey` means the slot has no key. Reuses
+    /// the in-memory copy while that provider's slot is unchanged (D7). Throws `SpeechError`.
+    public func speechCredentials(for provider: SpeechProviderID) async throws -> SpeechCredentials {
+        guard controlAuthenticated else { throw SpeechError("与服务器的连接未就绪") }
+        guard speechConfigSupported else { throw SpeechError("服务器版本过旧，不支持语音识别设置") }
+        let slot = speechConfig?[provider]
+        if let slot, let cached = cachedSpeechCredentials[provider], cached.slot == slot { return cached.credentials }
+        let reply = try await controlRequest { requestID in
+            var get = Coflux_V1_SpeechCredentialsGet()
+            get.requestID = requestID
+            get.provider = Self.wireProvider(provider)
+            return .speechCredentialsGet(get)
+        }
+        guard case .speechCredentials(let value) = reply else { throw SpeechError("服务器的回应无效") }
+        if !value.error.isEmpty { throw SpeechError(value.error) }
+        let credentials = SpeechCredentials(
+            provider: provider,
+            baseURL: value.baseURL.isEmpty ? provider.defaultBaseURL : value.baseURL,
+            model: value.model.isEmpty ? provider.defaultModel : value.model,
+            apiKey: value.apiKey
+        )
+        // Cache only when no status change of this slot raced the fetch.
+        if !value.apiKey.isEmpty, let slot, speechConfig?[provider] == slot {
+            cachedSpeechCredentials[provider] = (credentials, slot)
+        }
+        return credentials
+    }
+
+    private func speechWrite(
+        _ makePayload: (String) -> Coflux_V1_ClientToServer.OneOf_Payload
+    ) async -> SpeechWriteResult {
         guard controlAuthenticated else { return .failed("与服务器的连接未就绪，修改没有保存") }
-        guard speechKeySupported else { return .failed("服务器版本过旧，不支持保存语音识别 Key") }
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard speechConfigSupported else { return .failed("服务器版本过旧，不支持保存语音识别设置") }
         do {
-            let reply = try await controlRequest { requestID in
-                var set = Coflux_V1_SpeechKeySet()
-                set.requestID = requestID
-                set.apiKey = trimmed
-                return .speechKeySet(set)
-            }
-            guard case .speechKeyStatus(let status) = reply else { return .failed("服务器的回应无效") }
+            let reply = try await controlRequest(makePayload)
+            guard case .speechConfigStatus(let status) = reply else { return .failed("服务器的回应无效") }
             return status.error.isEmpty ? .ok : .failed(status.error)
-        } catch let error as SpeechKeyError {
+        } catch let error as SpeechError {
             return .failed(error.message)
         } catch {
             return .failed("修改没有保存")
         }
     }
 
-    /// The account's dictation key in plaintext; an empty string means none is configured. Reuses the
-    /// in-memory copy while the status's `updatedAt` is unchanged (D8). Throws `SpeechKeyError`.
-    public func speechKey() async throws -> String {
-        guard controlAuthenticated else { throw SpeechKeyError("与服务器的连接未就绪") }
-        guard speechKeySupported else { throw SpeechKeyError("服务器版本过旧，不支持语音识别 Key") }
-        let tag = speechKeyStatus?.updatedAt
-        if let cachedSpeechKey, let tag, cachedSpeechKey.updatedAt == tag { return cachedSpeechKey.key }
-        let reply = try await controlRequest { requestID in
-            var get = Coflux_V1_SpeechKeyGet()
-            get.requestID = requestID
-            return .speechKeyGet(get)
+    private func applySpeechConfigStatus(_ value: Coflux_V1_SpeechConfigStatus) {
+        var providers: [SpeechProviderID: SpeechProviderState] = [:]
+        for entry in value.providers {
+            guard let id = Self.providerID(entry.provider) else { continue }
+            providers[id] = SpeechProviderState(
+                baseURL: entry.baseURL,
+                model: entry.model,
+                keyConfigured: entry.keyConfigured,
+                updatedAt: entry.updatedAt
+            )
         }
-        guard case .speechKeyValue(let value) = reply else { throw SpeechKeyError("服务器的回应无效") }
-        if !value.error.isEmpty { throw SpeechKeyError(value.error) }
-        // Cache only when no status change raced the fetch.
-        if !value.apiKey.isEmpty, let tag, speechKeyStatus?.updatedAt == tag {
-            cachedSpeechKey = (value.apiKey, tag)
+        let next = SpeechConfig(active: Self.providerID(value.active) ?? .doubao, providers: providers)
+        // Credentials stay valid only while their slot is exactly what they were fetched for.
+        for provider in SpeechProviderID.allCases where next[provider] != speechConfig?[provider] {
+            cachedSpeechCredentials[provider] = nil
         }
-        return value.apiKey
+        if next != speechConfig { speechConfig = next }
     }
 
-    private func resetSpeechKeyState() {
-        speechKeySupported = false
-        speechKeyStatus = nil
-        cachedSpeechKey = nil
+    private func resetSpeechState() {
+        speechConfigSupported = false
+        speechConfig = nil
+        cachedSpeechCredentials = [:]
+    }
+
+    private static func wireProvider(_ provider: SpeechProviderID) -> Coflux_V1_SpeechProvider {
+        switch provider {
+        case .doubao: .doubao
+        case .openai: .openai
+        }
+    }
+
+    private static func providerID(_ wire: Coflux_V1_SpeechProvider) -> SpeechProviderID? {
+        switch wire {
+        case .doubao: .doubao
+        case .openai: .openai
+        default: nil
+        }
     }
 
     private func controlRequest(
         _ makePayload: (String) -> Coflux_V1_ClientToServer.OneOf_Payload
     ) async throws -> ControlReply {
-        guard controlAuthenticated, currentConnection != nil else { throw SpeechKeyError("与服务器的连接未就绪") }
+        guard controlAuthenticated, currentConnection != nil else { throw SpeechError("与服务器的连接未就绪") }
         controlRequestSequence += 1
         let requestID = "ios-\(controlRequestSequence)-\(UUID().uuidString.prefix(8))"
         let payload = makePayload(requestID)
@@ -1207,7 +1280,7 @@ public final class CofluxClient {
             return try await withCheckedThrowingContinuation { continuation in
                 let timeout = Task { [weak self] in
                     do { try await Task.sleep(for: deadline) } catch { return }
-                    self?.settleControlRequest(requestID, .failure(SpeechKeyError("请求超时，请重试")))
+                    self?.settleControlRequest(requestID, .failure(SpeechError("请求超时，请重试")))
                 }
                 controlRequestWaiters[requestID] = ControlRequestWaiter(continuation: continuation, timeout: timeout)
                 send(payload)
@@ -1227,7 +1300,7 @@ public final class CofluxClient {
 
     private func failControlRequests(_ message: String) {
         for requestID in Array(controlRequestWaiters.keys) {
-            settleControlRequest(requestID, .failure(SpeechKeyError(message)))
+            settleControlRequest(requestID, .failure(SpeechError(message)))
         }
     }
 

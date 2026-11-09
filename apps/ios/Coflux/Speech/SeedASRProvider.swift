@@ -1,17 +1,9 @@
 import Foundation
 import os
 
-/// Why `SeedASRProvider.start()` failed (D9): the user can fix an invalid key; anything else is
-/// reported as the service being unreachable.
-enum SeedASRStartError: Error, Equatable {
-    /// The WebSocket handshake was answered with HTTP 401.
-    case invalidKey
-    /// Everything else: no network, a different handshake status, a protocol failure.
-    case unreachable
-}
-
 /// 豆包 Seed-ASR 2.0 streaming recognition (plan 20261108-ios-seed-asr), over the Volcengine
-/// "bigmodel_async" binary WebSocket protocol, billed to the account's Agent Plan key.
+/// "bigmodel_async" binary WebSocket protocol, billed to the account's Agent Plan key. The endpoint
+/// and the resource id come from the account's 豆包 configuration (plan 20261109-speech-providers D6).
 ///
 /// Frame layout, both directions: a 4-byte header
 /// `[version 1 | header size 1 (×4 bytes)] [message type | flags] [serialization | compression] [reserved]`,
@@ -22,8 +14,6 @@ actor SeedASRProvider: SpeechTranscribing {
     nonisolated let events: AsyncStream<SpeechTranscriptEvent>
     private let eventContinuation: AsyncStream<SpeechTranscriptEvent>.Continuation
 
-    private static let endpoint = URL(string: "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_async")!
-    private static let resourceID = "volc.seedasr.sauc.duration"
     /// 200 ms of 16 kHz mono Int16 PCM.
     private static let bytesPerFrame = 6400
     /// Seed's two-pass final result arrives ~0.7–0.9 s after the last frame.
@@ -48,6 +38,10 @@ actor SeedASRProvider: SpeechTranscribing {
     }
 
     private let apiKey: String
+    /// The full `wss://` endpoint, defaults already resolved.
+    private let endpoint: String
+    /// Sent as `X-Api-Resource-Id`: the configured model, defaults already resolved.
+    private let resourceID: String
     private let contextItems: [String]
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
@@ -63,9 +57,12 @@ actor SeedASRProvider: SpeechTranscribing {
     private var listenTask: Task<Void, Never>?
     private var finalWaiter: CheckedContinuation<Void, Never>?
 
+    /// `endpoint` / `resourceID`: the 豆包 slot's base URL and model with defaults resolved.
     /// `contextItems`: plain-text dialog context, most relevant first; empty = no context.
-    init(apiKey: String, contextItems: [String]) {
+    init(apiKey: String, endpoint: String, resourceID: String, contextItems: [String]) {
         self.apiKey = apiKey
+        self.endpoint = endpoint
+        self.resourceID = resourceID
         self.contextItems = contextItems
         var continuation: AsyncStream<SpeechTranscriptEvent>.Continuation!
         events = AsyncStream { continuation = $0 }
@@ -75,11 +72,16 @@ actor SeedASRProvider: SpeechTranscribing {
     // MARK: - SpeechTranscribing
 
     func start() async throws {
-        guard !torndown else { throw SeedASRStartError.unreachable }
+        guard !torndown else { throw SpeechStartError.unreachable }
+        guard let url = URL(string: endpoint) else {
+            Self.log.error("seed-asr endpoint is not a URL")
+            teardown(emitClosed: false)
+            throw SpeechStartError.unreachable
+        }
         let connectID = UUID().uuidString
-        var request = URLRequest(url: Self.endpoint)
+        var request = URLRequest(url: url)
         request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
-        request.setValue(Self.resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
+        request.setValue(resourceID, forHTTPHeaderField: "X-Api-Resource-Id")
         request.setValue(connectID, forHTTPHeaderField: "X-Api-Request-Id")
         request.setValue(connectID, forHTTPHeaderField: "X-Api-Connect-Id")
         request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
@@ -95,7 +97,7 @@ actor SeedASRProvider: SpeechTranscribing {
             payload = try Self.configPayload(contextItems: contextItems)
         } catch {
             teardown(emitClosed: false)
-            throw SeedASRStartError.unreachable
+            throw SpeechStartError.unreachable
         }
         sequence = 1
         do {
@@ -111,9 +113,9 @@ actor SeedASRProvider: SpeechTranscribing {
             let id = logID
             Self.log.error("seed-asr handshake failed: status \(status, privacy: .public), logid \(id, privacy: .public)")
             teardown(emitClosed: false)
-            throw status == 401 ? SeedASRStartError.invalidKey : SeedASRStartError.unreachable
+            throw status == 401 ? SpeechStartError.invalidKey : SpeechStartError.unreachable
         }
-        guard !torndown else { throw SeedASRStartError.unreachable }
+        guard !torndown else { throw SpeechStartError.unreachable }
         logID = (task.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Tt-Logid") ?? ""
         listenTask = Task { [weak self] in
             await self?.listenLoop(task)
