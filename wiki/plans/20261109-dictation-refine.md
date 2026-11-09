@@ -229,6 +229,9 @@ Product conclusions (confirmed at the product gate, "确认"):
 8. (decided while planning) the record is separate from `SpeechProvider` (D3); wire numbers (D4);
    model id pattern (D6); migration 13 as its own table (D7); term sentence size and form (D11); the
    toggle only when texts differ (D15).
+9. (refreshed at dispatch) the Execution brief cited decision ids without restating them; a
+   "Constraints the tasks cite" section now restates D3–D15 for the executor, who sees the brief
+   alone.
 
 ### Maintenance notes
 
@@ -273,6 +276,91 @@ English; user-facing copy is the Chinese given here.
 
 Milestone dependencies: M1 first. M2, M3 and M4 each need only M1 and are independent of each other
 (disjoint files). M5 needs M4.
+
+There is no repository formatter for TypeScript or Swift: match the surrounding style. Never format
+generated files.
+
+### Constraints the tasks cite
+
+- **D3** The correction configuration is its own record — never a value of `enum SpeechProvider`,
+  never selectable as 当前使用, never part of `SpeechConfigStatus.providers` (documented as always
+  listing exactly the two engines).
+- **D4** Wire shape, additive only:
+  - `message SpeechRefineConfig { bool enabled = 1; string base_url = 2; string model = 3; bool key_configured = 4; double updated_at = 5; }`
+  - `SpeechConfigStatus.refine = 5` (`SpeechRefineConfig`), present in every status without an error.
+  - `message SpeechRefineSet { string request_id = 1; bool enabled = 2; string base_url = 3; string model = 4; string api_key = 5; bool clear_api_key = 6; }` —
+    replaces `enabled`, base URL and model; non-empty `api_key` replaces the key, `clear_api_key`
+    removes it, neither keeps it, both at once is refused; answered with `SpeechConfigStatus`
+    carrying the same `request_id`.
+  - `message SpeechRefineCredentialsGet { string request_id = 1; }`, answered only to the requesting
+    connection with `message SpeechRefineCredentials { string request_id = 1; string base_url = 2; string model = 3; string api_key = 4; string error = 5; }`.
+  - `ClientToServer.speech_refine_set = 56`, `ClientToServer.speech_refine_credentials_get = 57`,
+    `ServerToClient.speech_refine_credentials = 55`, `AuthOk.speech_refine = 12`.
+- **D5** The plaintext key appears only in a `SpeechRefineCredentials` answer to the asking
+  connection; statuses carry `key_configured` / `updated_at` only; no log line (server or phone)
+  carries the key, the conversation context or the dictated text; the phone caches credentials in
+  memory only, invalidated when the refine `updated_at` changes and on logout.
+- **D6** Centre validation of a refine write: base URL empty or an absolute `https:` URL of at most
+  512 characters with no credentials, query or fragment (the same rule as the OpenAI engine's base
+  URL); model empty or at most 128 characters matching `^[A-Za-z0-9][A-Za-z0-9._:/-]*$`; key rules as
+  for engine keys; `enabled = true` with an empty base URL or model is refused. A key write without
+  `COFLUX_EXECUTOR_KEYS` is refused while field writes and clearing still save. Forms mirror these
+  rules for immediate feedback only.
+- **D7** Table `coflux.account_speech_refine`: `account_id TEXT PRIMARY KEY REFERENCES coflux.accounts(id) ON DELETE CASCADE`,
+  `enabled BOOLEAN NOT NULL DEFAULT false`, `base_url TEXT NOT NULL DEFAULT ''`,
+  `model TEXT NOT NULL DEFAULT ''`, `api_key_ciphertext TEXT` (nullable),
+  `updated_at DOUBLE PRECISION NOT NULL`. No row = disabled and unconfigured.
+- **D8** Two transcript reads start at touch-down, both through the existing
+  `client.executeInWorkspace` exec, both filtered on the device by a fixed literal `sh -c` script
+  that drops tool-output lines before printing — Claude lines containing `"type":"tool_result"`;
+  Codex lines whose record is `function_call_output`, `custom_tool_call_output` or `event_msg`. The
+  recognition read prints at most 256 KiB of filtered body and keeps today's 1.2 s deadline; the
+  correction read prints at most 1 MiB and only has to be ready when the recogniser finishes. The
+  device's exec path has no output cap of its own, so the scripts must bound their output. The
+  session id stays a positional argument (`sh -c <script> sh <id>`); a size is either a fixed
+  literal in the script or a positional argument validated as digits inside the script — never
+  interpolated into the script text.
+- **D9** From tool calls (Claude `tool_use` blocks, Codex `function_call` / `custom_tool_call`), keep
+  only short fields that name things — file paths, paths, commands, glob and search patterns,
+  queries, URLs — each value capped at about 300 characters. Never file contents, `old_string`,
+  `new_string`, `content`, patches, code bodies (Codex `custom_tool_call` inputs are patches or
+  code-mode snippets: take at most the command strings they plainly contain, or nothing), or any tool
+  output.
+- **D10** Repository terms: a parallel exec at touch-down, a fixed literal `sh -c` script running
+  `git ls-files` in the workspace with its output bounded on the device (at most 256 KiB); the phone
+  derives deduplicated file basenames, stems and directory names. No git, not a repository, or any
+  error → no terms, never a failure.
+- **D11** The recognition context gains one term sentence right after the workspace sentence, at
+  most about 200 of the 1500 estimated tokens, of distinct terms — most recent tool-input and
+  conversation terms first, then repository names — in the form 「相关术语：A、B、C。」. Both engines
+  get it (they share the context items).
+- **D12** The correction request: `POST {base URL without trailing slashes}/chat/completions`,
+  `Authorization: Bearer <key>`, JSON body with `model`, `messages`, `temperature: 0`, a bounded
+  `max_tokens`, `stream: false` — and no other (vendor-specific) fields. One system message with the
+  fixed instructions; one user message ordered for provider prefix caching: workspace sentence, term
+  list, the conversation in chronological order (oldest first), then the recogniser's text, clearly
+  delimited, last. Total budget about 24k estimated tokens; when over, drop the oldest conversation
+  first.
+- **D13** Accept the answer only if the first choice's message content — trimmed, with one
+  surrounding pair of quotes or one code fence removed — is non-empty and its length is within
+  0.5×–2× the recogniser's text in characters. Anything else (HTTP error, timeout, unparsable body,
+  failed check) → the recogniser's text, outcome "not refined". No retry.
+- **D14** The correction phase — waiting for its context plus the request — is bounded at about 3 s
+  from the moment the recogniser's final text is available. If the correction context is not ready
+  in time, use whatever context is ready (at least the recognition context). The recognition
+  admission and its 1.2 s context deadline do not change.
+- **D15** When the corrected text equals the recogniser's text, the header still reads
+  「识别结果 · 已整理」 but no 「看原文」 toggle is offered.
+
+Settings group structure (desktop and iOS), below the two engine groups and outside 当前使用:
+
+```
+── 识别后整理 ─────────  [开关]  ● 已配置
+   用大模型按对话和仓库术语纠正识别结果。建议选不带深度思考的快速模型。
+   Base URL  [https://…/v1]
+   模型      [model id]
+   API Key   [已保存（留空则不改）]          [保存] [清除]
+```
 
 ### Milestone 1: the wire carries the correction configuration
 
@@ -363,8 +451,8 @@ Depends on: Milestone 1
 
 - Where: `apps/desktop/src/renderer/components/settings/speech-section.tsx` — `export function SpeechSection(`,
   `function ProviderGroup(`.
-- Change: add a third group below the two engines, outside the 当前使用 selector, with the structure
-  in the product conclusions: switch, Base URL (placeholder `https://api.example.com/v1`), 模型, API Key
+- Change: add a third group below the two engines, outside the 当前使用 selector, with the settings group
+  structure shown under "Constraints the tasks cite": switch, Base URL (placeholder `https://api.example.com/v1`), 模型, API Key
   (write-only, 「已保存（留空则不改）」 when one is stored), 保存 and 清除, a status of 「● 已配置」
   (enabled, key, Base URL and model all present), 「○ 未启用」 (switch off) or 「○ 未配置」 (on but
   something missing), and the line 「用大模型按对话和仓库术语纠正识别结果。建议选不带深度思考的快速模型。」.
