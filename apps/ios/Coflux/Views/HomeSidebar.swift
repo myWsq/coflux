@@ -100,7 +100,7 @@ struct HomeSidebar: View {
             }
         }
         .sheet(isPresented: $showingSettings) {
-            SpeechSettingsSheet(client: client)
+            SettingsSheet(client: client)
         }
         .sheet(item: $secretSheet) { target in
             SecretRequestSheet(client: client, taskID: target.taskID)
@@ -188,65 +188,16 @@ struct HomeSidebar: View {
     /// (hollow when offline), the name, and online · RTT · its terminals below. Offline devices
     /// are dimmed. Opens the device's own terminal page.
     private func deviceRow(_ daemon: Coflux_V1_DaemonInfo) -> some View {
-        let rtt = daemon.online ? client.deviceTransports[daemon.daemonID]?.rttMs : nil
-        let running = client.deviceRunningTerminalCount(daemon.daemonID)
-        return Button {
+        Button {
             navigation.showDevice(daemonID: daemon.daemonID)
         } label: {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 26 * 0.32)
-                    .fill(Theme.accentSurface)
-                    .frame(width: 26, height: 26)
-                    .overlay {
-                        Image(systemName: devicePlatformSymbol(daemon.platform))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.foreground)
-                    }
-                    .overlay(alignment: .topTrailing) {
-                        Group {
-                            if daemon.online {
-                                Circle().fill(deviceRTTTone(rtt))
-                            } else {
-                                Circle().fill(Theme.card)
-                                    .overlay(Circle().strokeBorder(Theme.mutedForeground, lineWidth: 1.2))
-                            }
-                        }
-                        .frame(width: 26 * 0.34, height: 26 * 0.34)
-                        .overlay(Circle().strokeBorder(Theme.card, lineWidth: 2).padding(-2))
-                        .offset(x: 26 * 0.1, y: -26 * 0.1)
-                    }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(daemon.name.isEmpty ? daemon.host : daemon.name)
-                        .font(Theme.Fonts.rowTitle)
-                        .foregroundStyle(Theme.foreground)
-                        .lineLimit(1)
-                    deviceLine(online: daemon.online, rtt: rtt, running: running)
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.mutedForeground)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
+            DeviceRowContent(client: client, daemon: daemon)
         }
         .buttonStyle(.plain)
-        .opacity(daemon.online ? 1 : 0.55)
         .copyHandleContextMenu(.device, id: daemon.daemonID)
         .listRowBackground(rowBackground(navigation.selectedDeviceID == daemon.daemonID))
         .listRowSeparator(.hidden)
         .listRowInsets(Self.rowInsets)
-    }
-
-    private func deviceLine(online: Bool, rtt: Double?, running: Int) -> Text {
-        guard online else { return Text("离线") }
-        var line = Text("在线")
-        if let rtt {
-            line = line + Text(" · ") + Text("\(Int(rtt.rounded())) ms").foregroundStyle(deviceRTTTone(rtt))
-        }
-        if running > 0 {
-            line = line + Text(" · \(running) 个终端")
-        }
-        return line
     }
 
     /// Who is signed in (`AuthOk.login_name`) and the connection to the centre, in the sidebar's

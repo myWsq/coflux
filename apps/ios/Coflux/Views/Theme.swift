@@ -96,3 +96,33 @@ private extension Color {
         )
     }
 }
+
+/// The soft top edge under a title (the sidebar's scroll edge, user's call 2026-11-10): what
+/// slides under the title blurs and fades out instead of being cut. Solid enough at the top to
+/// keep the title legible, clear for the last `fade` points.
+struct TopEdgeBlur: View {
+    static let fade: CGFloat = 14
+
+    var body: some View {
+        GeometryReader { proxy in
+            let solid = max(0, 1 - Self.fade / max(proxy.size.height, 1))
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(Theme.terminal.opacity(0.55))
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black, location: 0),
+                            .init(color: .black, location: solid),
+                            .init(color: .clear, location: 1),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+        }
+        .environment(\.colorScheme, .dark)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}

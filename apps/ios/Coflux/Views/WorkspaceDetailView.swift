@@ -85,6 +85,8 @@ struct WorkspaceDetailView: View {
     @State private var laptopPose = false
     /// The list of every terminal, opened from the active avatar.
     @State private var showingTerminalList = false
+    /// A finger is on the pager: only a drag, not a settling bounce, calls up the sidebar.
+    @State private var pagerDragging = false
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -337,9 +339,16 @@ struct WorkspaceDetailView: View {
         } else if layout == .tall {
             tallArrangement
         } else {
-            VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                ZStack(alignment: .bottom) {
+                    terminalColumn(reserveDock: true)
+                    dock(inlineKeypad: false)
+                }
+                .padding(.top, barsOnRail ? Self.railTitleHeight : 0)
                 // With the bars on the rail the title row is the page's own: the name on the
-                // left, the avatars on the right.
+                // left, the avatars on the right. It floats over the terminal on a soft edge
+                // (user's call, 2026-11-10): the keypad pushes the terminal up under it, where it
+                // blurs and fades as a list does under the sidebar's bar, instead of being cut.
                 if barsOnRail {
                     HStack(spacing: 12) {
                         pageTitle
@@ -350,16 +359,13 @@ struct WorkspaceDetailView: View {
                     .padding(.trailing, 10)
                     .frame(height: 44)
                     .padding(.top, 6)
-                    .background(Theme.terminal)
-                    .zIndex(1)
+                    .background(alignment: .top) {
+                        TopEdgeBlur()
+                            .frame(height: Self.railTitleHeight + TopEdgeBlur.fade)
+                    }
                 }
-                ZStack(alignment: .bottom) {
-                    terminalColumn(reserveDock: true)
-                    dock(inlineKeypad: false)
-                }
-                // The keypad pushes the terminal up past the title row: clip it there.
-                .clipped()
             }
+            .clipped()
             // With the bars on the rail nothing is drawn across the top or the bottom (status,
             // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
             // the title row and the keys take them.
@@ -383,11 +389,17 @@ struct WorkspaceDetailView: View {
                     .frame(maxHeight: .infinity, alignment: laptop ? .top : .bottom)
                     .overlayArrangementEdge(VerticalEdge.bottom)
             } secondary: {
+                // Not clipped: the keypad pushes the terminal up under the top bar, where the
+                // soft edge below blurs it as the bars on the rail do.
                 terminalColumn(reserveDock: !laptop)
-                    .clipped()
             }
             // Overlay, not split: fully open the keypad must not stay on screen.
             .arrangementViewStyle(OverlayArrangementViewStyle().axes(.vertical))
+            .overlay(alignment: .top) {
+                TopEdgeBlur()
+                    .frame(height: proxy.safeAreaInsets.top + TopEdgeBlur.fade)
+                    .offset(y: -proxy.safeAreaInsets.top)
+            }
             .onChange(of: laptop, initial: true) { _, isLaptop in
                 laptopPose = isLaptop
             }
@@ -430,6 +442,10 @@ struct WorkspaceDetailView: View {
     }
 
     private static let avatarOverlap: CGFloat = 10
+    /// The rail layouts' own title row: 6 pt above a 44 pt row.
+    private static let railTitleHeight: CGFloat = 50
+    /// How far past the first terminal a pull goes before the sidebar comes out.
+    private static let sidebarPullDistance: CGFloat = 56
 
     /// The pile's width, rings included.
     private var avatarsWidth: CGFloat {
@@ -649,6 +665,20 @@ struct WorkspaceDetailView: View {
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition($pagerPosition)
+        // On the first terminal, pulling further right calls up the floating sidebar — as the
+        // outer display's swipe back leaves the page once the pager is at its start. The pager
+        // owns horizontal swipes, so the split view's own edge swipe never got them (seen on the
+        // Duo, 2026-11-10).
+        .onScrollPhaseChange { _, phase in
+            pagerDragging = phase == .interacting
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.x + geometry.contentInsets.leading
+        } action: { _, offset in
+            guard layout == .tall, pagerDragging, offset < -Self.sidebarPullDistance,
+                  navigation.overlayVisibility == .detailOnly else { return }
+            navigation.overlayVisibility = .all
+        }
         // A swipe settles on a page: that terminal becomes the active one.
         .onChange(of: pagerPosition.viewID(type: String.self)) { _, id in
             guard let id, id != activeTaskID else { return }

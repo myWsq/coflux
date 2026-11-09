@@ -2,7 +2,7 @@ import CofluxClientCore
 import SwiftUI
 
 /// 「语音识别」 settings (plan 20261108-ios-seed-asr): the account's 豆包 Seed-ASR key, which long-press
-/// dictation uses. Opened from the account menu and from the dictation overlay's 「去设置」.
+/// dictation uses. Opened from 「设置」 (`SettingsSheet`) and from the dictation overlay's 「去设置」.
 ///
 /// The key typed here lives only in this view's state until it is sent once; the field never shows
 /// the stored key (the sheet does not fetch it) and is cleared when the sheet closes.

@@ -423,32 +423,3 @@ struct ConnectionBanner: View {
         }
     }
 }
-
-/// "N 台设备在线" for the home title's subtitle.
-@MainActor
-func onlineDevicesSubtitle(_ client: CofluxClient) -> String {
-    let online = client.daemons.filter(\.online).count
-    return online == 0 ? "没有在线设备" : "\(online) 台设备在线"
-}
-
-/// The account menu of home and the sidebar.
-struct AccountMenu: View {
-    let client: CofluxClient
-    @State private var showingSpeechSettings = false
-
-    var body: some View {
-        Menu {
-            Button("语音识别…", systemImage: "waveform") {
-                showingSpeechSettings = true
-            }
-            Button("退出登录", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-                client.logout()
-            }
-        } label: {
-            Label("账号", systemImage: "person.crop.circle")
-        }
-        .sheet(isPresented: $showingSpeechSettings) {
-            SpeechSettingsSheet(client: client)
-        }
-    }
-}

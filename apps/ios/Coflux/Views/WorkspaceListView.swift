@@ -15,6 +15,7 @@ struct WorkspaceListView: View {
     @State private var waitingPage: String?
     @State private var showingNewTerminal = false
     @State private var secretSheet: SecretSheetTarget?
+    @State private var showingSettings = false
 
     var body: some View {
         let items = client.waitingItems
@@ -47,7 +48,9 @@ struct WorkspaceListView: View {
         .toolbar(removing: .title)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                AccountMenu(client: client)
+                Button("设置", systemImage: "gearshape") {
+                    showingSettings = true
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -56,6 +59,9 @@ struct WorkspaceListView: View {
                     Label("新建终端", systemImage: "plus")
                 }
             }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(client: client)
         }
         .sheet(isPresented: $showingNewTerminal) {
             NewTerminalPicker(client: client)
