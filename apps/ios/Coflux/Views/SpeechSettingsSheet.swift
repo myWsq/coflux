@@ -68,7 +68,7 @@ struct SpeechSettingsSheet: View {
                             .foregroundStyle(Theme.destructive)
                     }
                 } footer: {
-                    Text("长按说话时调用这里选中的服务；设置加密保存在账号上，账号下的所有设备共用。")
+                    Text("长按说话时调用这里选中的服务；设置保存在账号上，账号下的所有设备共用；API Key 加密保存。")
                 }
                 .listRowBackground(Theme.secondarySurface)
 

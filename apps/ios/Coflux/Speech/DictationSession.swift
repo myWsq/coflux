@@ -282,7 +282,7 @@ final class DictationSession: ObservableObject {
         guard let provider else {
             pendingPCM.append(data)
             pendingPCMBytes += data.count
-            while pendingPCMBytes > Self.pendingPCMCapBytes, !pendingPCM.isEmpty {
+            while pendingPCMBytes > pendingPCMCapBytes, !pendingPCM.isEmpty {
                 pendingPCMBytes -= pendingPCM.removeFirst().count
             }
             return

@@ -105,7 +105,7 @@ export function SpeechSection({ client }: { client: CofluxClient }) {
           />
           <SettingsRow
             label="生效范围"
-            description="设置加密保存在账号上，账号下所有设备共用；桌面端只能写入或清除 API Key，不会读回或显示它。"
+            description="设置保存在账号上，账号下所有设备共用；API Key 加密保存，桌面端只能写入或清除它，不会读回或显示它。"
           />
         </SettingsGroup>
         {activeResult ? <FeedbackLine variant={activeResult.kind === "ok" ? "success" : "error"} text={activeResult.text} /> : null}
