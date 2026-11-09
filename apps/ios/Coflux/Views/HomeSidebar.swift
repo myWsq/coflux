@@ -59,9 +59,6 @@ struct HomeSidebar: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Theme.surface)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            ConnectionBanner(client: client)
-        }
         // The device rows show each device's latency: measured only while the sidebar is up.
         .measuresDevices(client: client)
         .onGeometryChange(for: CGFloat.self) { proxy in
@@ -275,9 +272,11 @@ struct HomeSidebar: View {
         return line
     }
 
-    /// Who is signed in (`AuthOk.login_name`) and on which centre, in the sidebar's top bar: two
-    /// lines in the terminal page's title style, no avatar (user's call, 2026-11-10), centred on
-    /// the settings button beside it. A tap offers 退出登录.
+    /// Who is signed in (`AuthOk.login_name`) and the connection to the centre, in the sidebar's
+    /// top bar: two lines in the terminal page's title style, no avatar (user's calls,
+    /// 2026-11-10), centred on the settings button beside it. The second line replaces the
+    /// home's disconnection banner here, so the list never jumps when it comes and goes. A tap
+    /// offers 退出登录.
     private var accountMenu: some View {
         let name = client.loginName
         return Menu {
@@ -290,10 +289,8 @@ struct HomeSidebar: View {
                     .font(Theme.Fonts.rowTitle)
                     .foregroundStyle(name.isEmpty ? Theme.mutedForeground : Theme.foreground)
                     .truncationMode(.middle)
-                Text(Config.serverURL.host() ?? "")
+                connectionLine
                     .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.mutedForeground)
-                    .truncationMode(.middle)
             }
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,6 +298,18 @@ struct HomeSidebar: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("账号 \(name)")
+    }
+
+    @ViewBuilder
+    private var connectionLine: some View {
+        switch client.status {
+        case .connected:
+            Text("已连接").foregroundStyle(Theme.mutedForeground)
+        case .connecting:
+            Text("连接中…").foregroundStyle(Theme.warning)
+        case .disconnected:
+            Text("已断开，恢复后自动重连").foregroundStyle(Theme.warning)
+        }
     }
 
     private func rowBackground(_ selected: Bool) -> some View {

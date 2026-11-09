@@ -133,7 +133,7 @@ svg.i { width: 20px; height: 20px; stroke: #e6e6e3; fill: none; stroke-width: 2;
   <header>
     <span class="spec">内屏竖开 669 × 951 pt · 不再有「首页 → 工作区」两级页面 · 工作区列表 = 浮在终端上方的侧栏</span>
     <h1>内屏竖开：浮动侧栏</h1>
-    <p>和内屏横放一样用分栏（<code>NavigationSplitView</code>，竖开时用 <code>.prominentDetail</code>），只是竖开时侧栏不占宽度：平时终端占满整屏，点左上角的侧栏按钮或从左边缘往右滑，侧栏浮出来盖在终端上；点一个工作区就切过去，侧栏自动收起。底部的「首页 / 设备」标签栏也不要了：设备像桌面端那样在侧栏里逐台列出，点一台就打开它的终端；侧栏顶上就是账号：左边两行文字（登录名、所连服务器），右边设置按钮，不再显示「coflux」和在线设备数，也没有搜索框。横放的左栏同样这么改。外屏不变。</p>
+    <p>和内屏横放一样用分栏（<code>NavigationSplitView</code>，竖开时用 <code>.prominentDetail</code>），只是竖开时侧栏不占宽度：平时终端占满整屏，点左上角的侧栏按钮或从左边缘往右滑，侧栏浮出来盖在终端上；点一个工作区就切过去，侧栏自动收起。底部的「首页 / 设备」标签栏也不要了：设备像桌面端那样在侧栏里逐台列出，点一台就打开它的终端；侧栏顶上就是账号：左边两行文字（登录名；连接状态：平时灰字「已连接」，断线时黄字），右边设置按钮，不再显示「coflux」和在线设备数，也没有搜索框。横放的左栏同样这么改。外屏不变。</p>
     <p class="hint">每台机器都能点：左上角按钮拉出侧栏，点侧栏里的行切换工作区；在侧栏上往左滑、或者点终端区域，侧栏就收回去。侧栏自己没有开关按钮。</p>
   </header>
 </div>
@@ -235,7 +235,7 @@ function sidebar(width, sel) {
       <span class="txt"><b>${d.name}</b><small class="t-idle">${line}</small></span></div>`;
   }).join("");
   return `<aside class="sb" style="--sbw:${width}px">
-    <div class="sbh"><span class="me"><span class="ttl"><b>wsq@coflux.dev</b><small>api.coflux.yourantiandi.com</small></span></span><span class="circ glass" title="设置">${svg("gear")}</span></div>
+    <div class="sbh"><span class="me"><span class="ttl"><b>wsq@coflux.dev</b><small>已连接</small></span></span><span class="circ glass" title="设置">${svg("gear")}</span></div>
     <div class="sbl"><div class="lh"><b>待处理</b> <span>· ${WAITING.length}</span></div>${waiting}${projects}
       <div class="lh"><b>设备</b> <span>· 3 台在线</span></div>${devices}</div><span class="grip"></span></aside>`;
 }
