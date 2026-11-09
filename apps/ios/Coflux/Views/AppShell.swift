@@ -3,9 +3,10 @@ import CofluxProtocol
 import SwiftUI
 
 /// The signed-in shell of one window. It measures its own window and picks a layout
-/// (`ShellLayout`): compact and tall are a `TabView` (首页 / 设备) with one `NavigationStack` per
-/// tab; split is a `NavigationSplitView` with the compact home as sidebar and the selected
-/// terminal as detail. Rotating, opening or closing the Duo, entering Split View or resizing a
+/// (`ShellLayout`): compact is a `TabView` (首页 / 设备) with one `NavigationStack` per tab; split
+/// and tall are a `NavigationSplitView` with the compact home as sidebar and the selected
+/// terminal as detail — side by side when wide, floating over the terminal when tall (mockup
+/// `wiki/plans/20261109-ios-inner-tall-sidebar-mockup.html`). Rotating, opening or closing the Duo, entering Split View or resizing a
 /// window re-runs the choice; the selection lives in `SceneNavigation`, so it survives.
 /// All chrome is system containers and toolbars — nothing is drawn by hand (D3).
 struct AppShell: View {
@@ -20,15 +21,23 @@ struct AppShell: View {
                 height: proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom
             )
             let layout = ShellLayout.choose(for: window)
-            // compact ⇄ tall keep one TabView (same branch); only split swaps the container.
             Group {
-                if layout == .split {
-                    splitLayout(fold: Self.bookFold(in: proxy))
-                } else {
+                switch layout {
+                case .compact:
                     tabLayout
+                case .split:
+                    splitLayout(fold: Self.bookFold(in: proxy))
+                case .tall:
+                    overlayLayout
                 }
             }
             .environment(\.shellLayout, layout)
+            // Nothing to show yet in a tall window: the floating sidebar comes out by itself.
+            .onChange(of: layout, initial: true) { _, layout in
+                if layout == .tall, navigation.tab == .home, navigation.workspaceID == nil {
+                    navigation.overlayVisibility = .all
+                }
+            }
         }
         .background(Theme.background)
         .overlay(alignment: .top) {
@@ -112,14 +121,42 @@ struct AppShell: View {
         return NavigationSplitView(columnVisibility: $navigation.columnVisibility) {
             HomeSidebar(client: client)
                 .navigationSplitViewColumnWidth(
-                    min: fold == nil ? 260 : sidebarWidth,
+                    min: fold == nil ? Self.sidebarMinWidth : sidebarWidth,
                     ideal: sidebarWidth,
-                    max: fold == nil ? 360 : sidebarWidth
+                    max: fold == nil ? Self.sidebarMaxWidth : sidebarWidth
                 )
         } detail: {
             detailColumn
                 .padding(.leading, sidebarVisible ? (fold?.width ?? 0) : 0)
         }
+    }
+
+    /// The range the sidebar can be dragged across, wide or floating.
+    private static let sidebarMinWidth: CGFloat = 260
+    private static let sidebarMaxWidth: CGFloat = 360
+    /// The floating sidebar's default width (user's call, 2026-11-09).
+    private static let overlaySidebarWidth: CGFloat = 320
+
+    // MARK: - Overlay layout (large window taller than wide)
+
+    /// The tall layout: the same split view with the detail prominent — the terminal fills the
+    /// window and the sidebar floats over it, so bringing it out never resizes the terminal. A
+    /// selection puts it away (`SceneNavigation.show`). The system's sidebar toggle is replaced
+    /// by `SidebarToggleButton`, which carries the waiting count the 首页 tab used to.
+    private var overlayLayout: some View {
+        @Bindable var navigation = navigation
+        return NavigationSplitView(columnVisibility: $navigation.overlayVisibility) {
+            HomeSidebar(client: client)
+                .navigationSplitViewColumnWidth(
+                    min: Self.sidebarMinWidth,
+                    ideal: Self.overlaySidebarWidth,
+                    max: Self.sidebarMaxWidth
+                )
+        } detail: {
+            detailColumn
+        }
+        .navigationSplitViewStyle(.prominentDetail)
+        .toolbar(removing: .sidebarToggle)
     }
 
     @ViewBuilder
@@ -128,10 +165,12 @@ struct AppShell: View {
         if navigation.tab == .devices {
             NavigationStack(path: $navigation.devicePath) {
                 DevicesView(client: client)
+                    .sidebarToggleItem(client: client)
             }
         } else {
             NavigationStack {
                 if let workspaceID = navigation.workspaceID {
+                    // The terminal page places the toggle itself, ahead of its title.
                     WorkspacePage(client: client, workspaceID: workspaceID)
                         .id(workspaceID)
                 } else {
@@ -141,6 +180,7 @@ struct AppShell: View {
                         description: Text("从左侧选择工作区或待处理的终端")
                     )
                     .background(Theme.background)
+                    .sidebarToggleItem(client: client)
                 }
             }
         }
@@ -167,6 +207,45 @@ struct WorkspacePage: View {
                 description: Text("这个工作区已被删除或不在当前账号中")
             )
             .background(Theme.background)
+            .sidebarToggleItem(client: client)
+        }
+    }
+}
+
+/// The tall layout's sidebar button, at the leading end of the detail's top bar: brings the
+/// floating sidebar out, badged with the terminals waiting for the user (the 首页 tab's badge in
+/// the compact layout). Pages place it themselves so it comes before their own leading items.
+struct SidebarToggleButton: View {
+    let client: CofluxClient
+    @Environment(SceneNavigation.self) private var navigation
+
+    var body: some View {
+        Button("显示边栏", systemImage: "sidebar.leading") {
+            navigation.toggleOverlaySidebar()
+        }
+        .badge(client.waitingCount)
+    }
+}
+
+extension View {
+    /// Adds `SidebarToggleButton` to a detail page's top bar in the tall layout; elsewhere the
+    /// sidebar is always beside the page or the page is in a tab.
+    func sidebarToggleItem(client: CofluxClient) -> some View {
+        modifier(SidebarToggleItem(client: client))
+    }
+}
+
+private struct SidebarToggleItem: ViewModifier {
+    let client: CofluxClient
+    @Environment(\.shellLayout) private var layout
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if layout == .tall {
+                ToolbarItem(placement: .topBarLeading) {
+                    SidebarToggleButton(client: client)
+                }
+            }
         }
     }
 }

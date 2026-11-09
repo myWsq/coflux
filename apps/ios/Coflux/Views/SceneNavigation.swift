@@ -9,8 +9,9 @@ enum ShellLayout: Equatable, Sendable {
     case compact
     /// A large window wider than tall (the inner display, open wide): sidebar + terminal.
     case split
-    /// A large window taller than wide (the inner display, open tall): tab bar + stacks, with
-    /// the tall terminal arrangement (laptop pose when half folded).
+    /// A large window taller than wide (the inner display, open tall): the terminal fills the
+    /// window and the sidebar floats over it on demand; the tall terminal arrangement (laptop
+    /// pose when half folded).
     case tall
 
     /// A window is "large" only when both of its sides are; then its aspect picks split or tall.
@@ -64,6 +65,10 @@ final class SceneNavigation {
     private(set) var activeTaskByWorkspace: [String: String] = [:]
     var devicePath: [DeviceRoute] = []
     var columnVisibility: NavigationSplitViewVisibility = .all
+    /// The tall layout's floating sidebar: shown (`.all`) or put away (`.detailOnly`). Kept
+    /// apart from `columnVisibility` so the overlay closing on every selection never collapses
+    /// the wide layout's sidebar.
+    var overlayVisibility: NavigationSplitViewVisibility = .detailOnly
     /// A terminal created from home that opens once it appears in the snapshot.
     var pendingTerminal: PendingTerminal?
     /// Terminals whose agent finished its turn and that the user has looked at since (the
@@ -103,6 +108,18 @@ final class SceneNavigation {
         tab = .home
         if let taskID { activeTaskByWorkspace[workspaceID] = taskID }
         self.workspaceID = workspaceID
+        overlayVisibility = .detailOnly
+    }
+
+    /// The 设备 entry of the sidebar.
+    func showDevices() {
+        tab = .devices
+        overlayVisibility = .detailOnly
+    }
+
+    /// The tall layout's sidebar button: bring the floating sidebar out or put it away.
+    func toggleOverlaySidebar() {
+        overlayVisibility = overlayVisibility == .detailOnly ? .all : .detailOnly
     }
 
     func reset() {
@@ -111,6 +128,7 @@ final class SceneNavigation {
         activeTaskByWorkspace = [:]
         devicePath = []
         columnVisibility = .all
+        overlayVisibility = .detailOnly
         pendingTerminal = nil
         seenFinishedTaskIDs = []
     }

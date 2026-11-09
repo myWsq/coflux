@@ -748,6 +748,12 @@ struct WorkspaceDetailView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        if layout == .tall {
+            // Where the compact layout's back button sits: the floating sidebar's button.
+            ToolbarItem(placement: .topBarLeading) {
+                SidebarToggleButton(client: client)
+            }
+        }
         if !barsOnRail {
             // The rail's title row, in the top bar: the title on the left; the avatars right
             // before 新建终端 and 更多, solid (no shared glass). The title gets a fixed width — the

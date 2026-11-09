@@ -5,11 +5,14 @@ import SwiftUI
 /// Home compacted into the split layout's sidebar (plan D8, mockup W1/W2): "需要你" rows, then the
 /// projects with their workspace rows, and the 设备 entry. Tapping a row switches the detail column
 /// to that terminal with no back navigation; the selected row is highlighted. The search field at
-/// the bottom filters workspaces and terminals by name. When the sidebar is wide (book pose, where
-/// it takes the leading half) the rows carry more: the time and the diff.
+/// the bottom filters workspaces and terminals by name. Workspace rows end their state line with
+/// the diff. When the sidebar is wide (book pose, where it takes the leading half) the rows carry
+/// more: the time and the custom label. In the tall layout the same sidebar floats over the
+/// terminal (`AppShell`).
 struct HomeSidebar: View {
     let client: CofluxClient
     @Environment(SceneNavigation.self) private var navigation
+    @Environment(\.shellLayout) private var layout
     @State private var query = ""
     @State private var wide = false
     @State private var secretSheet: SecretSheetTarget?
@@ -60,6 +63,15 @@ struct HomeSidebar: View {
         .navigationSubtitle(onlineDevicesSubtitle(client))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Floating over the terminal (tall layout) the sidebar puts itself away from here;
+            // the system toggle is removed there because it cannot carry the waiting count.
+            if layout == .tall {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("隐藏边栏", systemImage: "sidebar.leading") {
+                        navigation.toggleOverlaySidebar()
+                    }
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 AccountMenu(client: client)
             }
@@ -129,6 +141,9 @@ struct HomeSidebar: View {
                 if !item.workspaceID.isEmpty {
                     navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
                 }
+                // The sheet hangs off this sidebar: floating, it stays out until the sheet is
+                // done, or the sheet would lose the view it is presented from.
+                if layout == .tall { navigation.overlayVisibility = .all }
                 secretSheet = SecretSheetTarget(taskID: item.taskID)
             } else {
                 navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
@@ -181,14 +196,17 @@ struct HomeSidebar: View {
                                 .lineLimit(1)
                         }
                     }
-                    Text(activity.subtitle)
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(activity.tone.color)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
-                if wide {
-                    DiffStat(additions: workspace.additions, deletions: workspace.deletions)
+                    // The diff closes the state line on the right (user's call, 2026-11-09),
+                    // at any width: it no longer needs the wide sidebar's trailing column.
+                    HStack(spacing: 6) {
+                        Text(activity.subtitle)
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(activity.tone.color)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        DiffStat(additions: workspace.additions, deletions: workspace.deletions)
+                            .fixedSize()
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -201,7 +219,7 @@ struct HomeSidebar: View {
 
     private var devicesRow: some View {
         Button {
-            navigation.tab = .devices
+            navigation.showDevices()
         } label: {
             Label("设备", systemImage: "macbook.and.iphone")
                 .font(Theme.Fonts.rowTitle)
