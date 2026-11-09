@@ -507,7 +507,70 @@ export type DesktopBridge = {
   revealWorkspaceFile(root: string, path: string): Promise<DesktopWorkspaceFileResult>;
   /** Opens the file with its default app. Also refuses executables, bundles and launcher files. */
   openWorkspaceFile(root: string, path: string): Promise<DesktopWorkspaceFileResult>;
+  /**
+   * Dictation in terminal panes (plan 20261110-desktop-dictation). Main fetches the speech keys from
+   * the centre, runs the recogniser and the correction request; no key ever crosses this bridge in
+   * either direction. One session at a time: a new `dictationStart` cancels the previous one.
+   * Resolves once the recogniser is connected (audio may be sent from then on) or failed to start.
+   */
+  dictationStart(input: DesktopDictationStartInput): Promise<DesktopDictationStartResult>;
+  /** Fire-and-forget mono Int16 little-endian PCM at the provider's rate (16 kHz 豆包, 24 kHz OpenAI). */
+  dictationAudio(sessionId: string, pcm: ArrayBuffer): void;
+  /**
+   * Stop feeding: main flushes, waits for the final text and, with `refineContext` given and the
+   * correction usable, runs the correction. The outcome arrives as a `result` event, then `closed`.
+   */
+  dictationFinish(sessionId: string, refineContext: DesktopDictationRefineContext | null): void;
+  dictationCancel(sessionId: string): void;
+  onDictationEvent(listener: (event: DesktopDictationEvent) => void): () => void;
+  /** Microphone permission; asks macOS (TCC) when it has not been decided yet. */
+  microphoneAccess(): Promise<DesktopMicrophoneAccess>;
+  /** System Settings › Privacy & Security › Microphone. */
+  openMicrophoneSettings(): void;
+  /** Opens the settings page, as the native 「设置…」 menu item does. */
+  openSettings(): void;
 };
+
+export type DesktopDictationProvider = "doubao" | "openai";
+
+/** Recognition context for one dictation, plain text only: the workspace sentence first, then the
+ * term sentence, then conversation entries newest first (`我：…` / `Agent：…`). */
+export type DesktopDictationContext = { items: string[] };
+
+/** One conversation entry of the correction context; `tool` entries carry a tool call's naming
+ * fields and the tool's name. */
+export type DesktopDictationEntry = { speaker: "person" | "agent" | "tool"; text: string; tool?: string };
+
+/** Correction context: the workspace sentence, repository terms and the conversation, oldest first. */
+export type DesktopDictationRefineContext = {
+  workspaceSentence: string | null;
+  terms: string[];
+  entries: DesktopDictationEntry[];
+};
+
+export type DesktopDictationStartInput = {
+  provider: DesktopDictationProvider;
+  /** The provider slot's `updatedAt` as the renderer sees it (credential cache key). */
+  providerUpdatedAt: number;
+  /** The correction record's `updatedAt` when the correction will be used; null = no correction. */
+  refineUpdatedAt: number | null;
+  context: DesktopDictationContext;
+};
+
+export type DesktopDictationStartError = "not_configured" | "invalid_key" | "unreachable";
+
+export type DesktopDictationStartResult = { ok: true; sessionId: string } | { ok: false; error: DesktopDictationStartError };
+
+export type DesktopDictationEvent =
+  /** The recogniser's full text so far; `final` = confirmed, later speech grows after it. */
+  | { sessionId: string; kind: "text"; text: string; final: boolean }
+  /** After `dictationFinish`: the recogniser's text (trimmed) and the accepted correction, if any. */
+  | { sessionId: string; kind: "result"; raw: string; refined: string | null }
+  /** The recogniser failed after it started; `text` is whatever was recognised until then. */
+  | { sessionId: string; kind: "failed"; error: "unreachable" | "invalid_key"; text: string }
+  | { sessionId: string; kind: "closed" };
+
+export type DesktopMicrophoneAccess = "granted" | "denied";
 
 export type DesktopWorkspaceFileResult = { ok: true } | { ok: false; error: string };
 

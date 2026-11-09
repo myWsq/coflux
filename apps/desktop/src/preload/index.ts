@@ -13,6 +13,10 @@ import type {
   DesktopBrowserScope,
   DesktopCommand,
   DesktopDaemonState,
+  DesktopDictationEvent,
+  DesktopDictationRefineContext,
+  DesktopDictationStartInput,
+  DesktopDictationStartResult,
   DesktopExecutorCatalog,
   DesktopExecutorInbound,
   DesktopExecutorOutbound,
@@ -23,6 +27,7 @@ import type {
   DesktopFocusTarget,
   DesktopLoginOptions,
   DesktopLoginProvider,
+  DesktopMicrophoneAccess,
   DesktopNotification,
   DesktopScreenEvent,
   DesktopUpdateState,
@@ -284,6 +289,55 @@ const bridge: DesktopBridge = {
   },
   openWorkspaceFile(root: string, path: string) {
     return workspaceFileResult(ipcRenderer.invoke(IPC.workspaceFileOpen, String(root), String(path)));
+  },
+  // Dictation (plan 20261110-desktop-dictation): rebuilt as plain values; main validates again.
+  dictationStart(input: DesktopDictationStartInput) {
+    return (
+      ipcRenderer.invoke(IPC.dictationStart, {
+        provider: String(input.provider),
+        providerUpdatedAt: Number(input.providerUpdatedAt),
+        refineUpdatedAt: input.refineUpdatedAt === null ? null : Number(input.refineUpdatedAt),
+        context: { items: input.context.items.map((item) => String(item)) },
+      }) as Promise<DesktopDictationStartResult>
+    ).catch(() => ({ ok: false, error: "unreachable" }) as const);
+  },
+  dictationAudio(sessionId: string, pcm: ArrayBuffer) {
+    ipcRenderer.send(IPC.dictationAudio, String(sessionId), pcm);
+  },
+  dictationFinish(sessionId: string, refineContext: DesktopDictationRefineContext | null) {
+    ipcRenderer.send(
+      IPC.dictationFinish,
+      String(sessionId),
+      refineContext === null
+        ? null
+        : {
+            workspaceSentence: refineContext.workspaceSentence === null ? null : String(refineContext.workspaceSentence),
+            terms: refineContext.terms.map((term) => String(term)),
+            entries: refineContext.entries.map((entry) => ({
+              speaker: String(entry.speaker),
+              text: String(entry.text),
+              ...(entry.tool === undefined ? {} : { tool: String(entry.tool) }),
+            })),
+          },
+    );
+  },
+  dictationCancel(sessionId: string) {
+    ipcRenderer.send(IPC.dictationCancel, String(sessionId));
+  },
+  onDictationEvent(listener) {
+    return subscribe<DesktopDictationEvent>(IPC.dictationEvent, listener);
+  },
+  microphoneAccess() {
+    return (ipcRenderer.invoke(IPC.microphoneAccess) as Promise<unknown>).then(
+      (access): DesktopMicrophoneAccess => (access === "granted" ? "granted" : "denied"),
+      (): DesktopMicrophoneAccess => "denied",
+    );
+  },
+  openMicrophoneSettings() {
+    ipcRenderer.send(IPC.openMicrophoneSettings);
+  },
+  openSettings() {
+    ipcRenderer.send(IPC.openSettings);
   },
 };
 

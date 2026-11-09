@@ -1,4 +1,7 @@
 import type {
+  DesktopDictationEntry,
+  DesktopDictationRefineContext,
+  DesktopDictationStartInput,
   DesktopExecutorCustomProvider,
   DesktopExecutorInbound,
   DesktopExecutorSaveInput,
@@ -190,4 +193,85 @@ export function sanitizeExecutorChannel(payload: unknown): { daemonId: string; g
   const generation = record.generation;
   if (typeof generation !== "number" || !Number.isFinite(generation) || generation < 0) return null;
   return { daemonId: record.daemonId, generation: Math.floor(generation) };
+}
+
+// ===== dictation (plan 20261110-desktop-dictation) =====
+//
+// The renderer assembles the context from an agent transcript, i.e. text written by other programs;
+// main forwards it to the recogniser and the correction model. Shape and size are checked here,
+// content is never interpreted.
+
+const MAX_DICTATION_SESSION_ID = 128;
+const MAX_CONTEXT_ITEMS = 256;
+const MAX_CONTEXT_ITEM_CHARS = 16 * 1024;
+const MAX_CONTEXT_CHARS = 128 * 1024;
+const MAX_REFINE_ENTRIES = 20_000;
+const MAX_REFINE_ENTRY_CHARS = 64 * 1024;
+const MAX_REFINE_CHARS = 4 * 1024 * 1024;
+const MAX_REFINE_TERMS = 4_000;
+const MAX_REFINE_TERM_CHARS = 256;
+const MAX_SENTENCE_CHARS = 2_000;
+const MAX_TOOL_NAME_CHARS = 64;
+/** About 20 s of 24 kHz Int16 audio in one message; the renderer sends ~100 ms chunks. */
+const MAX_DICTATION_PCM_BYTES = 1024 * 1024;
+
+export function sanitizeDictationSessionId(payload: unknown): string | null {
+  if (typeof payload !== "string" || !payload || payload.length > MAX_DICTATION_SESSION_ID) return null;
+  return payload;
+}
+
+export function sanitizeDictationStart(payload: unknown): DesktopDictationStartInput | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { provider, providerUpdatedAt, refineUpdatedAt, context } = payload as Record<string, unknown>;
+  if (provider !== "doubao" && provider !== "openai") return null;
+  if (typeof providerUpdatedAt !== "number" || !Number.isFinite(providerUpdatedAt)) return null;
+  if (refineUpdatedAt !== null && (typeof refineUpdatedAt !== "number" || !Number.isFinite(refineUpdatedAt))) return null;
+  if (!context || typeof context !== "object") return null;
+  const items = (context as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length > MAX_CONTEXT_ITEMS) return null;
+  let total = 0;
+  const kept: string[] = [];
+  for (const item of items) {
+    if (typeof item !== "string" || item.length > MAX_CONTEXT_ITEM_CHARS) return null;
+    total += item.length;
+    if (total > MAX_CONTEXT_CHARS) return null;
+    kept.push(item);
+  }
+  return { provider, providerUpdatedAt, refineUpdatedAt, context: { items: kept } };
+}
+
+/** Null = no correction; a payload of the wrong shape is dropped to no correction as well. */
+export function sanitizeDictationRefineContext(payload: unknown): DesktopDictationRefineContext | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { workspaceSentence, terms, entries } = payload as Record<string, unknown>;
+  if (workspaceSentence !== null && (typeof workspaceSentence !== "string" || workspaceSentence.length > MAX_SENTENCE_CHARS)) return null;
+  if (!Array.isArray(terms) || terms.length > MAX_REFINE_TERMS) return null;
+  if (!terms.every((term) => typeof term === "string" && term.length > 0 && term.length <= MAX_REFINE_TERM_CHARS)) return null;
+  if (!Array.isArray(entries) || entries.length > MAX_REFINE_ENTRIES) return null;
+  let total = 0;
+  const kept: DesktopDictationEntry[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") return null;
+    const { speaker, text, tool } = entry as Record<string, unknown>;
+    if (speaker !== "person" && speaker !== "agent" && speaker !== "tool") return null;
+    if (typeof text !== "string" || text.length > MAX_REFINE_ENTRY_CHARS) return null;
+    if (tool !== undefined && (typeof tool !== "string" || tool.length > MAX_TOOL_NAME_CHARS)) return null;
+    total += text.length;
+    if (total > MAX_REFINE_CHARS) return null;
+    kept.push(typeof tool === "string" ? { speaker, text, tool } : { speaker, text });
+  }
+  return { workspaceSentence: workspaceSentence as string | null, terms: terms as string[], entries: kept };
+}
+
+/** Int16 PCM: a non-empty, even-sized buffer of bounded size. */
+export function sanitizeDictationPcm(payload: unknown): Buffer | null {
+  if (payload instanceof ArrayBuffer) {
+    if (payload.byteLength === 0 || payload.byteLength > MAX_DICTATION_PCM_BYTES || payload.byteLength % 2 !== 0) return null;
+    return Buffer.from(payload);
+  }
+  if (ArrayBuffer.isView(payload)) {
+    if (payload.byteLength === 0 || payload.byteLength > MAX_DICTATION_PCM_BYTES || payload.byteLength % 2 !== 0) return null;
+    return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  }
+  return null;
 }

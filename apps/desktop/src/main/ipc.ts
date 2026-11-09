@@ -2,6 +2,9 @@ import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 
 import type {
   DesktopBrowserLoginResult,
+  DesktopDictationRefineContext,
+  DesktopDictationStartInput,
+  DesktopDictationStartResult,
   DesktopDaemonState,
   DesktopExecutorCatalog,
   DesktopExecutorInbound,
@@ -11,6 +14,7 @@ import type {
   DesktopExecutorTestResult,
   DesktopLoginOptions,
   DesktopLoginProvider,
+  DesktopMicrophoneAccess,
   DesktopNotification,
   DesktopUpdateState,
 } from "../shared/desktop-bridge";
@@ -18,6 +22,10 @@ import { IPC, type Bootstrap } from "../shared/ipc";
 import {
   sanitizeBadgeCount,
   sanitizeClipboardText,
+  sanitizeDictationPcm,
+  sanitizeDictationRefineContext,
+  sanitizeDictationSessionId,
+  sanitizeDictationStart,
   sanitizeExecutorChannel,
   sanitizeExecutorInbound,
   sanitizeExecutorSave,
@@ -69,6 +77,14 @@ export type IpcActions = {
   executorInbound: (message: DesktopExecutorInbound) => void;
   /** daemonId 空串 = 本机 daemon 的 device 通道断了；generation 标识这一次连接 */
   executorChannel: (daemonId: string, generation: number) => void;
+  /** Dictation (plan 20261110-desktop-dictation): keys stay in main; nothing here returns one. */
+  dictationStart: (input: DesktopDictationStartInput) => Promise<DesktopDictationStartResult>;
+  dictationAudio: (sessionId: string, pcm: Buffer) => void;
+  dictationFinish: (sessionId: string, refineContext: DesktopDictationRefineContext | null) => void;
+  dictationCancel: (sessionId: string) => void;
+  microphoneAccess: () => Promise<DesktopMicrophoneAccess>;
+  openMicrophoneSettings: () => void;
+  openSettings: () => void;
 };
 
 /** 每条 IPC 都先校验发送方 frame 来源；不可信一律忽略。 */
@@ -212,5 +228,44 @@ export function registerIpc(actions: IpcActions, trusted: TrustedSenders): void 
     if (!isTrusted(event)) return;
     const channel = sanitizeExecutorChannel(payload);
     if (channel) actions.executorChannel(channel.daemonId, channel.generation);
+  });
+
+  ipcMain.handle(IPC.dictationStart, (event, payload: unknown) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    const input = sanitizeDictationStart(payload);
+    if (!input) return Promise.resolve({ ok: false, error: "unreachable" } satisfies DesktopDictationStartResult);
+    return actions.dictationStart(input);
+  });
+
+  ipcMain.on(IPC.dictationAudio, (event, sessionId: unknown, pcm: unknown) => {
+    if (!isTrusted(event)) return;
+    const id = sanitizeDictationSessionId(sessionId);
+    const audio = sanitizeDictationPcm(pcm);
+    if (id && audio) actions.dictationAudio(id, audio);
+  });
+
+  ipcMain.on(IPC.dictationFinish, (event, sessionId: unknown, refineContext: unknown) => {
+    if (!isTrusted(event)) return;
+    const id = sanitizeDictationSessionId(sessionId);
+    if (id) actions.dictationFinish(id, refineContext === null ? null : sanitizeDictationRefineContext(refineContext));
+  });
+
+  ipcMain.on(IPC.dictationCancel, (event, sessionId: unknown) => {
+    if (!isTrusted(event)) return;
+    const id = sanitizeDictationSessionId(sessionId);
+    if (id) actions.dictationCancel(id);
+  });
+
+  ipcMain.handle(IPC.microphoneAccess, (event) => {
+    if (!isTrusted(event)) throw new Error("untrusted sender");
+    return actions.microphoneAccess();
+  });
+
+  ipcMain.on(IPC.openMicrophoneSettings, (event) => {
+    if (isTrusted(event)) actions.openMicrophoneSettings();
+  });
+
+  ipcMain.on(IPC.openSettings, (event) => {
+    if (isTrusted(event)) actions.openSettings();
   });
 }

@@ -48,6 +48,8 @@ export type RendererResetTargets = {
   resetBrowserHost?: () => void;
   /** Remote screen tabs (plan 20260929-remote-desktop): the old page's sessions, lanes and ports. */
   resetScreenHost?: () => void;
+  /** Dictation (plan 20261110-desktop-dictation): the old page's microphone is gone; its session goes too. */
+  resetDictation?: () => void;
 };
 
 /** A committed navigation of the window's own `webContents`. */
@@ -85,5 +87,6 @@ export function createRendererResetListener(
     targets.setBadge(0);
     targets.resetBrowserHost?.();
     targets.resetScreenHost?.();
+    targets.resetDictation?.();
   };
 }
