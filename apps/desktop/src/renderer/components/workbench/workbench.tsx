@@ -22,6 +22,7 @@ import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding
 import { NavigationPalette } from "@/components/workbench/command-palette";
 import { deviceVisitKey, terminalVisitKey, workspaceVisitKey } from "@/components/workbench/command-palette-data";
 import { recordRecentPlace, type RecentPlacesStore } from "@/components/workbench/command-palette-recent";
+import { currentWorkspaces, nextAttentionRow } from "@/components/workbench/current-workspaces";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { useSettingsTooltipControl } from "@/components/workbench/account-footer";
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
@@ -1113,6 +1114,33 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   /**
+   * ⌘⇧A 「下一个待处理」 (plan 20261109-sidebar-current-section): walks the sidebar's 「当前」 list,
+   * derived at the moment of the press from the store, the visit record and the selection — the
+   * same list the sidebar shows, never the notification snapshot. Lands on the waiting terminal
+   * when the activity names one, else selects the workspace; does nothing when no row waits.
+   */
+  function goToNextAttention() {
+    const state = client.store.getState();
+    const selectedId = selection?.kind === "workspace" ? selection.id : null;
+    const rows = currentWorkspaces({
+      projects: state.projects,
+      workspaces: state.workspaces,
+      daemons: state.daemons,
+      tasks: state.tasks,
+      sessionAgents: state.sessionAgents,
+      visits: workspaceVisits,
+      selectedWorkspaceId: selectedId,
+      now: Date.now(),
+    });
+    const target = nextAttentionRow(rows, selectedId);
+    if (!target) return;
+    const activity = target.activity;
+    const taskId = activity.status === "approval" || activity.status === "question" || activity.status === "error" ? activity.taskId : undefined;
+    if (taskId && landOnTask(taskId)) return;
+    selectWorkspace(target.workspace.id);
+  }
+
+  /**
    * Collapse or expand the sidebar (plan 20260930-collapsible-sidebar). The button that was clicked
    * unmounts with the side it belongs to (the sidebar's band, or the left dock), which would drop
    * keyboard focus to `body` and leave the terminal deaf until clicked, so the caret goes back to the
@@ -1736,6 +1764,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
     onToggleHelp: () => setHelpOpen((open) => !open),
     onToggleSettings: () => setSettingsOpen((open) => !open),
     onTogglePalette: togglePalette,
+    onNextAttention: goToNextAttention,
     // 设置页盖住工作台时终端既看不见也点不到，⌘T/⌘W/⌘1 之类再落到终端上就是盲操作；
     // 原生菜单项走同一条挂起开关。跳转面板同理，而且它还要拿回被这里吞掉的 ⌘[ ⌘]。
     isSuspended: settingsOpen || paletteOpen,

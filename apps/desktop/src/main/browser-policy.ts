@@ -214,6 +214,8 @@ export function classifyGuestKey(input: GuestKeyInput): GuestKeyAction | null {
     if (code === "Equal") return { kind: "zoom", direction: "in" };
     // Browser annotations' annotate mode (plan 20260929-annotation-polish), as in Cursor's Design Mode.
     if (code === "KeyD") return { kind: "browser", action: "toggle-annotate" };
+    // 下一个待处理 (plan 20261109-sidebar-current-section); bare ⌘A stays the page's select-all.
+    if (code === "KeyA") return { kind: "command", command: "next-attention" };
     return null;
   }
 

@@ -124,6 +124,11 @@ export type DesktopCommand =
   | "toggle-help"
   /** ⌘B / 视图 → 显示/隐藏侧边栏 (plan 20260930-collapsible-sidebar): collapse or expand the workbench sidebar. */
   | "toggle-sidebar"
+  /**
+   * ⌘⇧A / 视图 → 下一个待处理 (plan 20261109-sidebar-current-section): select the next workspace
+   * in the sidebar's 「当前」 list whose agent waits for the user (approval, question or error).
+   */
+  | "next-attention"
   | "open-settings"
   | "toggle-palette";
 

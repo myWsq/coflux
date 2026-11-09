@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { TaskStatus, type Project, type Task, type Workspace } from "@coflux/protocol";
 import type { SessionAgentState } from "@coflux/client";
 
-import { currentWorkspaces, type CurrentWorkspacesInput } from "./current-workspaces";
+import { currentWorkspaces, nextAttentionRow, type CurrentWorkspacesInput } from "./current-workspaces";
 import { RECENT_VISIT_WINDOW_MS } from "./workspace-visits";
 import { sidebarTree } from "./workspace-order";
 
@@ -158,4 +158,25 @@ test("输出顺序始终是树序，与活动和访问时间无关；状态变�
 test("没有工作区就是空列表", () => {
   assert.deepEqual(ids(input({ workspaces: [] })), []);
   assert.deepEqual(ids(input({ projects: [], workspaces: [] })), []);
+});
+
+test("下一个待处理：选中项之后的第一个，到末尾绕回开头", () => {
+  const rows = currentWorkspaces(input(withAgents({ "p1-a": "approval", "p1-b": "active", "p1-c": "question", "p2-x": "error", "p2-main": "done" })));
+  assert.deepEqual(rows.map((row) => row.workspace.id), ["p1-a", "p1-b", "p1-c", "p2-main", "p2-x"]);
+  assert.equal(nextAttentionRow(rows, "p1-a")?.workspace.id, "p1-c");
+  assert.equal(nextAttentionRow(rows, "p1-b")?.workspace.id, "p1-c");
+  assert.equal(nextAttentionRow(rows, "p1-c")?.workspace.id, "p2-x");
+  assert.equal(nextAttentionRow(rows, "p2-x")?.workspace.id, "p1-a");
+  // Nothing selected, or a selection outside the list: the first one.
+  assert.equal(nextAttentionRow(rows, null)?.workspace.id, "p1-a");
+  assert.equal(nextAttentionRow(rows, "elsewhere")?.workspace.id, "p1-a");
+});
+
+test("下一个待处理：只有选中项待处理时落回它自己；没有待处理就没有目标", () => {
+  const only = currentWorkspaces(input({ ...withAgents({ "p1-b": "question", "p2-x": "active" }), selectedWorkspaceId: "p1-b" }));
+  assert.equal(nextAttentionRow(only, "p1-b")?.workspace.id, "p1-b");
+
+  const none = currentWorkspaces(input({ ...withAgents({ "p1-b": "active", "p2-x": "done" }), selectedWorkspaceId: "p1-b" }));
+  assert.equal(nextAttentionRow(none, "p1-b"), null);
+  assert.equal(nextAttentionRow([], null), null);
 });

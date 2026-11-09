@@ -62,3 +62,22 @@ export function currentWorkspaces(input: CurrentWorkspacesInput): CurrentWorkspa
 
   return candidates.filter((row) => members.has(row.workspace.id));
 }
+
+/** A row whose agent waits for the user: `approval`, `question` or `error` (待处理). */
+export function needsAttention(row: CurrentWorkspaceRow): boolean {
+  return row.activity.status === "approval" || row.activity.status === "question" || row.activity.status === "error";
+}
+
+/**
+ * ⌘⇧A 「下一个待处理」: the first 待处理 row after the selected workspace in list order, wrapping
+ * around; the selected workspace itself only when it is the sole one. With nothing selected (or
+ * the selection not in the list) the first 待处理 row. Null when no row needs the user.
+ */
+export function nextAttentionRow(rows: readonly CurrentWorkspaceRow[], selectedWorkspaceId: string | null): CurrentWorkspaceRow | null {
+  const start = rows.findIndex((row) => row.workspace.id === selectedWorkspaceId);
+  for (let step = 1; step <= rows.length; step += 1) {
+    const row = rows[(start + step) % rows.length];
+    if (needsAttention(row)) return row;
+  }
+  return null;
+}

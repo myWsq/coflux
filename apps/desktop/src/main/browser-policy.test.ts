@@ -184,6 +184,9 @@ test("app page shortcuts leave a focused page as commands", () => {
   assert.equal(command(key("Backslash")), "split-right");
   assert.equal(command(key("IntlBackslash")), "split-right");
   assert.equal(command(key("Backslash", { shift: true })), "split-down");
+  assert.equal(command(key("KeyA", { shift: true })), "next-attention");
+  // Bare ⌘A is the page's select-all, not the app's.
+  assert.equal(classifyGuestKey(key("KeyA")), null);
   assert.equal(command(key("Digit3")), "focus-group-3");
   assert.equal(command(key("Digit3", { alt: true })), "select-tab-3");
   assert.equal(command(key("ArrowLeft", { alt: true })), "focus-group-left");
