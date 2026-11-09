@@ -9,6 +9,10 @@ import SwiftUI
 /// URL and model start from the stored values (empty = the default shown as the placeholder). A key
 /// typed here lives only in this view's state until it is sent once; the field never shows the
 /// stored key (the sheet does not fetch it) and is cleared when the sheet closes.
+///
+/// 「识别后整理」 (plan 20261109-dictation-refine) follows: its switch writes at once with the stored
+/// base URL and model and keeps the key; its fields are saved with the toolbar 「保存」. It is not an
+/// engine and never appears under 「当前使用」.
 struct SpeechSettingsSheet: View {
     let client: CofluxClient
     @Environment(\.dismiss) private var dismiss
@@ -21,6 +25,11 @@ struct SpeechSettingsSheet: View {
     @State private var activeError: String?
     @State private var pendingActive: SpeechProviderID?
     @State private var busy = false
+    /// The correction section's edited base URL and model; nil = showing the stored values.
+    @State private var refineDraft: Draft?
+    /// The correction key typed here; never prefilled.
+    @State private var refineKey = ""
+    @State private var refineError: String?
 
     private struct Draft: Equatable {
         var baseURL: String
@@ -36,6 +45,11 @@ struct SpeechSettingsSheet: View {
     private var editable: Bool {
         client.speechConfigSupported && config != nil && !busy && pendingActive == nil
     }
+
+    /// The centre stores provider configurations but not the correction record.
+    private var refineOutdated: Bool { client.speechConfigSupported && !client.speechRefineSupported }
+
+    private var refineEditable: Bool { editable && client.speechRefineSupported }
 
     var body: some View {
         NavigationStack {
@@ -76,6 +90,7 @@ struct SpeechSettingsSheet: View {
                     ForEach(SpeechProviderID.allCases) { provider in
                         providerSection(provider, stored: config[provider])
                     }
+                    refineSection(stored: config.refine)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -95,7 +110,7 @@ struct SpeechSettingsSheet: View {
                                 if await saveChanged() { dismiss() }
                             }
                         }
-                        .disabled(!editable || changedProviders.isEmpty)
+                        .disabled(!editable || (changedProviders.isEmpty && !refineChanged))
                     }
                 }
             }
@@ -105,7 +120,10 @@ struct SpeechSettingsSheet: View {
         .presentationCornerRadius(34)
         .presentationBackground(Theme.card)
         .preferredColorScheme(.dark)
-        .onDisappear { keys = [:] }
+        .onDisappear {
+            keys = [:]
+            refineKey = ""
+        }
     }
 
     @ViewBuilder
@@ -164,6 +182,82 @@ struct SpeechSettingsSheet: View {
         .listRowBackground(Theme.secondarySurface)
     }
 
+    /// 「识别后整理」: switch and status, then the same three fields as an engine.
+    @ViewBuilder
+    private func refineSection(stored: SpeechRefineState) -> some View {
+        Section {
+            if refineOutdated {
+                LabeledContent("状态") {
+                    Text("服务器版本过旧")
+                        .foregroundStyle(Theme.mutedForeground)
+                }
+            }
+            Toggle(isOn: refineEnabledBinding(stored)) {
+                HStack(spacing: 8) {
+                    Text("识别后整理")
+                    if !refineOutdated {
+                        Text(refineStatus(stored).text)
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(refineStatus(stored).color)
+                    }
+                }
+            }
+            .disabled(!refineEditable)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Base URL")
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+                TextField("Base URL", text: refineDraftBinding(\.baseURL), prompt: Text("https://api.example.com/v1"))
+                    .keyboardType(.URL)
+                    .textContentType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            .disabled(!refineEditable)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("模型")
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+                TextField("模型", text: refineDraftBinding(\.model), prompt: Text("model id"))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            .disabled(!refineEditable)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key")
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.mutedForeground)
+                SecureField(stored.keyConfigured ? "已保存（留空则不改）" : "粘贴 API Key", text: refineKeyBinding)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            .disabled(!refineEditable)
+            if let refineError {
+                Text(refineError)
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.destructive)
+            }
+            if stored.keyConfigured {
+                Button("清除 API Key", role: .destructive) {
+                    Task { await clearRefineKey(stored: stored) }
+                }
+                .disabled(!refineEditable)
+            }
+        } header: {
+            Text("识别后整理")
+        } footer: {
+            Text("用大模型按对话和仓库术语纠正识别结果。建议选不带深度思考的快速模型。")
+        }
+        .listRowBackground(Theme.secondarySurface)
+    }
+
+    /// ● 已配置 (on and complete), ○ 未启用 (off), ○ 未配置 (on but something missing).
+    private func refineStatus(_ stored: SpeechRefineState) -> (text: String, color: Color) {
+        if !stored.enabled { return ("○ 未启用", Theme.mutedForeground) }
+        return stored.isUsable ? ("● 已配置", Theme.success) : ("○ 未配置", Theme.warning)
+    }
+
     private func footer(for provider: SpeechProviderID) -> String {
         switch provider {
         case .doubao:
@@ -205,6 +299,50 @@ struct SpeechSettingsSheet: View {
         )
     }
 
+    private var storedRefine: SpeechRefineState { config?.refine ?? SpeechRefineState() }
+
+    private var currentRefine: Draft {
+        refineDraft ?? Draft(baseURL: storedRefine.baseURL, model: storedRefine.model)
+    }
+
+    private func refineDraftBinding(_ field: WritableKeyPath<Draft, String>) -> Binding<String> {
+        Binding(
+            get: { currentRefine[keyPath: field] },
+            set: { value in
+                var draft = currentRefine
+                draft[keyPath: field] = value
+                refineDraft = draft
+                refineError = nil
+            }
+        )
+    }
+
+    private var refineKeyBinding: Binding<String> {
+        Binding(
+            get: { refineKey },
+            set: { value in
+                refineKey = value
+                refineError = nil
+            }
+        )
+    }
+
+    /// The switch writes at once with the stored base URL and model, keeping the key. Turning it on
+    /// without a stored base URL or model shows the error and leaves it off.
+    private func refineEnabledBinding(_ stored: SpeechRefineState) -> Binding<Bool> {
+        Binding(
+            get: { stored.enabled },
+            set: { enabled in
+                guard enabled != stored.enabled, refineEditable else { return }
+                if enabled, stored.baseURL.isEmpty || stored.model.isEmpty {
+                    refineError = "开启识别后整理前请先填写并保存 Base URL 和模型"
+                    return
+                }
+                Task { await setRefineEnabled(enabled, stored: stored) }
+            }
+        )
+    }
+
     private func activeBinding(_ config: SpeechConfig) -> Binding<SpeechProviderID> {
         Binding(
             get: { pendingActive ?? config.active },
@@ -232,6 +370,15 @@ struct SpeechSettingsSheet: View {
         }
     }
 
+    /// The correction section's base URL or model differ from the stored values, or a key is typed.
+    private var refineChanged: Bool {
+        guard client.speechRefineSupported else { return false }
+        let draft = currentRefine
+        return Self.trimmed(draft.baseURL) != storedRefine.baseURL
+            || Self.trimmed(draft.model) != storedRefine.model
+            || !Self.trimmed(refineKey).isEmpty
+    }
+
     private func setActive(_ provider: SpeechProviderID) async {
         pendingActive = provider
         activeError = nil
@@ -251,6 +398,16 @@ struct SpeechSettingsSheet: View {
                 provider: provider, baseURL: draft.baseURL, model: draft.model, apiKey: keys[provider] ?? ""
             ) {
                 errors[provider] = message
+                invalid = true
+            }
+        }
+        let refineWrite = refineChanged
+        if refineWrite {
+            let draft = currentRefine
+            if let message = speechRefineInputError(
+                enabled: storedRefine.enabled, baseURL: draft.baseURL, model: draft.model, apiKey: refineKey
+            ) {
+                refineError = message
                 invalid = true
             }
         }
@@ -274,7 +431,41 @@ struct SpeechSettingsSheet: View {
                 return false
             }
         }
+        if refineWrite {
+            refineError = nil
+            let draft = currentRefine
+            let typedKey = Self.trimmed(refineKey)
+            let result = await client.setSpeechRefine(
+                enabled: storedRefine.enabled, baseURL: draft.baseURL, model: draft.model,
+                key: typedKey.isEmpty ? .keep : .replace(typedKey)
+            )
+            switch result {
+            case .ok:
+                refineDraft = nil
+                refineKey = ""
+            case .failed(let message):
+                refineError = message
+                return false
+            }
+        }
         return true
+    }
+
+    private func setRefineEnabled(_ enabled: Bool, stored: SpeechRefineState) async {
+        busy = true
+        refineError = nil
+        let result = await client.setSpeechRefine(enabled: enabled, baseURL: stored.baseURL, model: stored.model, key: .keep)
+        busy = false
+        if case .failed(let message) = result { refineError = message }
+    }
+
+    /// Remove the correction key, keeping the stored switch, base URL and model.
+    private func clearRefineKey(stored: SpeechRefineState) async {
+        busy = true
+        refineError = nil
+        let result = await client.setSpeechRefine(enabled: stored.enabled, baseURL: stored.baseURL, model: stored.model, key: .clear)
+        busy = false
+        if case .failed(let message) = result { refineError = message }
     }
 
     /// Remove one provider's key, keeping its stored base URL and model.
