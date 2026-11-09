@@ -216,7 +216,7 @@ Local smoke testing: `pnpm -C apps/desktop run pack` produces unsigned `apps/des
 
 ## iOS TestFlight releases
 
-The iOS app is released on its own, outside the `v*` tag: `apps/ios/release.sh` archives, uploads to App Store Connect, and then runs `apps/ios/testflight-distribute.mjs` to finish distribution. The build number is the commit count, so it rises on its own and the project file is never touched.
+The iOS app is released on its own, outside the `v*` tag (moving it into the release workflow waits for an Xcode 27 GitHub runner image; see the roadmap's release automation item). After a release that changes the iOS app, run `apps/ios/release.sh` by hand. It archives, uploads to App Store Connect, and then runs `apps/ios/testflight-distribute.mjs` to finish distribution. The build number is the commit count, so it rises on its own and the project file is never touched.
 
 Distribution needs two per-machine credentials, neither in Git:
 
