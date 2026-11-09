@@ -85,8 +85,6 @@ struct WorkspaceDetailView: View {
     @State private var laptopPose = false
     /// The list of every terminal, opened from the active avatar.
     @State private var showingTerminalList = false
-    /// A finger is on the pager: only a drag, not a settling bounce, calls up the sidebar.
-    @State private var pagerDragging = false
 
     /// Below this content height the key row folds into 按键 and only the composer stays
     /// (tall Split View, outer display in landscape): the terminal keeps its rows.
@@ -433,8 +431,6 @@ struct WorkspaceDetailView: View {
     private static let avatarOverlap: CGFloat = 10
     /// The rail layouts' own title row: 6 pt above a 44 pt row.
     private static let railTitleHeight: CGFloat = 50
-    /// How far past the first terminal a pull goes before the sidebar comes out.
-    private static let sidebarPullDistance: CGFloat = 56
 
     /// The pile's width, rings included.
     private var avatarsWidth: CGFloat {
@@ -651,23 +647,14 @@ struct WorkspaceDetailView: View {
                 }
             }
             .scrollTargetLayout()
+            // The floating sidebar's edge swipe goes before the pager (tall layout only: the
+            // split layout's sidebar is always out, the compact one has no split view).
+            .background {
+                if layout == .tall { SidebarEdgeSwipe() }
+            }
         }
         .scrollTargetBehavior(.paging)
         .scrollPosition($pagerPosition)
-        // On the first terminal, pulling further right calls up the floating sidebar — as the
-        // outer display's swipe back leaves the page once the pager is at its start. The pager
-        // owns horizontal swipes, so the split view's own edge swipe never got them (seen on the
-        // Duo, 2026-11-10).
-        .onScrollPhaseChange { _, phase in
-            pagerDragging = phase == .interacting
-        }
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentOffset.x + geometry.contentInsets.leading
-        } action: { _, offset in
-            guard layout == .tall, pagerDragging, offset < -Self.sidebarPullDistance,
-                  navigation.overlayVisibility == .detailOnly else { return }
-            navigation.overlayVisibility = .all
-        }
         // A swipe settles on a page: that terminal becomes the active one.
         .onChange(of: pagerPosition.viewID(type: String.self)) { _, id in
             guard let id, id != activeTaskID else { return }
