@@ -221,7 +221,11 @@ struct TerminalKey: View {
     }
 }
 
-/// 可连发键（方向/退格）：按下即发一次（实体键盘语义），按住 0.35s 后以 80ms 间隔连发，松手停。
+/// A key that repeats (arrows, backspace): a tap sends once on release; held for 0.35 s it sends
+/// at once and then every 80 ms until released. A finger that moves past the dock's drag
+/// threshold cancels the key without sending, so a swipe that starts on it moves the extra keys
+/// instead. (It used to send on touch-down, like a hardware key, which fired an arrow at the
+/// start of every swipe begun on one — seen on the Duo, 2026-11-10.)
 struct RepeatKey: View {
     let sender: TerminalKeySender
     var label: String?
@@ -229,30 +233,86 @@ struct RepeatKey: View {
     var height: CGFloat = Theme.Metrics.keyHeight
     var large = false
     let bytes: () -> String
+
+    /// How far the finger may wander before the touch counts as a swipe: the dock's drag
+    /// threshold, so the key gives up exactly when the extra keys start to follow.
+    private static let slop: CGFloat = 10
+    private static let holdDelay: Duration = .milliseconds(350)
+    private static let repeatInterval: TimeInterval = 0.08
+
+    private enum Phase { case idle, pressed, repeating, cancelled }
+
+    @GestureState private var touching = false
+    @State private var phase = Phase.idle
+    @State private var hold: Task<Void, Never>?
     @State private var timer: Timer?
 
     var body: some View {
         KeyCap(label: label, systemImage: systemImage, height: height, large: large)
-            .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 40) {
-                guard let sessionID = sender.sessionID else { return }
-                // 连发期间序列求值一次即可（按住途中 DECCKM 不会切换）；只捕获 Sendable 值跨进 Timer 闭包
-                let payload = bytes()
-                let client = sender.client
-                timer?.invalidate()
-                timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
-                    Task { @MainActor in client.sendInput(sessionID: sessionID, payload) }
-                }
-            } onPressingChanged: { pressing in
-                if pressing {
-                    sender.press(bytes())
-                } else {
-                    stop()
-                }
+            .opacity(phase == .pressed || phase == .repeating ? 0.6 : 1)
+            .animation(.easeOut(duration: 0.08), value: phase)
+            // Global coordinates: the dock moves under the finger once the extra keys follow it.
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .updating($touching) { _, state, _ in state = true }
+                    .onChanged { value in
+                        switch phase {
+                        case .idle:
+                            begin()
+                        case .pressed, .repeating:
+                            let moved = value.translation
+                            if hypot(moved.width, moved.height) > Self.slop { cancel() }
+                        case .cancelled:
+                            break
+                        }
+                    }
+                    .onEnded { _ in
+                        if phase == .pressed { sender.press(bytes()) }
+                        reset()
+                    }
+            )
+            // The system cancelled the touch (another gesture took it): no onEnded, nothing sent.
+            .onChange(of: touching) { _, touching in
+                if !touching { reset() }
             }
-            .onDisappear { stop() }
+            .onDisappear { reset() }
     }
 
-    private func stop() {
+    private func begin() {
+        phase = .pressed
+        hold = Task { @MainActor in
+            try? await Task.sleep(for: Self.holdDelay)
+            guard !Task.isCancelled, phase == .pressed else { return }
+            startRepeating()
+        }
+    }
+
+    private func startRepeating() {
+        guard let sessionID = sender.sessionID else { return }
+        phase = .repeating
+        // Evaluated once for the whole hold (DECCKM does not flip mid-hold); the Timer closure
+        // captures only Sendable values.
+        let payload = bytes()
+        let client = sender.client
+        sender.press(payload)
+        timer = Timer.scheduledTimer(withTimeInterval: Self.repeatInterval, repeats: true) { _ in
+            Task { @MainActor in client.sendInput(sessionID: sessionID, payload) }
+        }
+    }
+
+    private func cancel() {
+        stopTimers()
+        phase = .cancelled
+    }
+
+    private func reset() {
+        stopTimers()
+        phase = .idle
+    }
+
+    private func stopTimers() {
+        hold?.cancel()
+        hold = nil
         timer?.invalidate()
         timer = nil
     }

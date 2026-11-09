@@ -77,7 +77,7 @@ struct TerminalHostView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: .zero)
+        let view = CofluxTerminalView(frame: .zero)
         // 纯显示化（plan 053）：inputView 置空视图挡系统键盘（点按不再弹）、
         // 置 nil 去内置快捷条；保留 firstResponder → 长按选择/拷贝、外接硬件
         // 键盘直通不受影响。软键盘输入一律走 TerminalInputArea。
@@ -259,5 +259,40 @@ struct TerminalHostView: UIViewRepresentable {
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// SwiftTerm's terminal view, with its program-scroll drag kept to vertical swipes.
+///
+/// While a full-screen application runs (an alternate screen, or any mouse tracking, as Claude
+/// Code's full-screen mode has), SwiftTerm adds a one-finger pan that reports the drag to the
+/// application as wheel presses. That pan begins in any direction, so it took every horizontal
+/// swipe too: the pager stopped switching terminals, the floating sidebar's edge swipe and the
+/// outer display's swipe back stopped working (seen on the Duo, 2026-11-10). Here that pan only
+/// begins when the drag is mostly vertical; a horizontal one fails it and goes to the containers.
+///
+/// SwiftTerm adds and removes the pan as the mode changes and does not expose it, so it is
+/// recognised as it is added: a plain `UIPanGestureRecognizer` capped at one touch with no
+/// delegate of its own. If a later SwiftTerm changes that shape nothing is touched and the pan
+/// behaves as it always did.
+final class CofluxTerminalView: TerminalView {
+    private let verticalOnly = VerticalPanDelegate()
+
+    override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
+        if type(of: gestureRecognizer) == UIPanGestureRecognizer.self,
+           let pan = gestureRecognizer as? UIPanGestureRecognizer,
+           pan.maximumNumberOfTouches == 1,
+           pan.delegate == nil {
+            pan.delegate = verticalOnly
+        }
+        super.addGestureRecognizer(gestureRecognizer)
+    }
+
+    private final class VerticalPanDelegate: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+            let velocity = pan.velocity(in: pan.view)
+            return abs(velocity.y) > abs(velocity.x)
+        }
     }
 }
