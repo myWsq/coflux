@@ -114,7 +114,7 @@ export const exchangeSpeechCredentials: CredentialExchange = (serverUrl, token, 
           const value = payload.value;
           refine = { baseUrl: value.baseUrl, model: value.model, apiKey: value.apiKey, error: value.error };
           complete();
-        } else if (payload.case === "authError" || payload.case === "clientOutdated") {
+        } else if (payload.case === "authError" || payload.case === "clientOutdated" || payload.case === "error") {
           finish(new Error(payload.case));
         }
       } catch {
