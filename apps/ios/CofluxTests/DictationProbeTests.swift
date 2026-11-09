@@ -23,15 +23,15 @@ struct DictationProbeTests {
     func audioCaptureStartStop() async throws {
         let capture = AudioCapture()
         do {
-            try capture.start()
+            try capture.start(sampleRate: 16000)
             try await Task.sleep(for: .seconds(1))
             capture.stop()
             // 二次启动：悬挂 tap/session 残留会在这里炸
-            try capture.start()
+            try capture.start(sampleRate: 16000)
             capture.stop()
         } catch SpeechCaptureError.inputUnavailable {
             // 无输入设备环境的合法出路；再走一遍确认可重复且仍不崩
-            do { try capture.start() } catch SpeechCaptureError.inputUnavailable {}
+            do { try capture.start(sampleRate: 24000) } catch SpeechCaptureError.inputUnavailable {}
         }
     }
 }

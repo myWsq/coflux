@@ -5,27 +5,32 @@ enum SpeechCaptureError: Error {
     case inputUnavailable
 }
 
-/// 共享采音器（plan 064 决策）：一份 AVAudioEngine tap，统一重采样到 16kHz mono
-/// Int16 PCM 喂给转写 provider（Seed-ASR 直接收 16k mono 原始 PCM）。
+/// 共享采音器（plan 064 决策）：一份 AVAudioEngine tap，统一重采样到调用方指定采样率的
+/// mono Int16 PCM 喂给转写 provider（Seed-ASR 收 16 kHz，OpenAI Realtime 收 24 kHz，
+/// plan 20261109-speech-providers D10）。
 /// 用 @unchecked Sendable：AVAudioEngine 的 tap 回调
 /// 跑在 CoreAudio 实时线程，不受 Swift 并发隔离管辖；本类只由持有者
 /// （DictationSession，MainActor）在 start/stop 上做外部串行化，tap 内部只读
-/// immutable 的 converter/format，不与外部发生并发写冲突。
+/// converter/format（只在未运行时的 start() 里换），不与外部发生并发写冲突。
 final class AudioCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true
-    )!
+    private var targetFormat = AudioCapture.format(sampleRate: 16000)
     private var converter: AVAudioConverter?
     private(set) var isRunning = false
 
-    /// 每帧转好的 16kHz mono Int16 PCM；在 CoreAudio 线程上调用
+    /// 每帧转好的 mono Int16 PCM（采样率为本次 start 指定的值）；在 CoreAudio 线程上调用
     var onPCM: (@Sendable (Data) -> Void)?
+
+    private static func format(sampleRate: Double) -> AVAudioFormat {
+        AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true)!
+    }
 
     /// 对讲期间独占音频（landmine）：激活录音会打断别的音频播放；
     /// 结束/取消/出错路径都必须走 stop()，不能留悬挂 tap（下次长按会静音或崩溃）
-    func start() throws {
+    /// `sampleRate`：本次输出的目标采样率（Hz），由所用 provider 决定。
+    func start(sampleRate: Double) throws {
         guard !isRunning else { return }
+        if targetFormat.sampleRate != sampleRate { targetFormat = Self.format(sampleRate: sampleRate) }
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement, options: [])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
