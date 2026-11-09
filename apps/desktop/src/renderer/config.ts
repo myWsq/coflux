@@ -32,6 +32,12 @@ export const COMMAND_PALETTE_RECENT_KEY = `coflux_recent_places:${SERVER_URL}`;
  */
 export const WORKSPACE_VISITS_KEY = `coflux_workspace_visits:${SERVER_URL}`;
 /**
+ * The sidebar projects the user expanded (plan 20261109-sidebar-current-section): a JSON array of
+ * project ids. A project not listed is collapsed, so a new one appears collapsed. Scoped by server
+ * address — project ids mean nothing on another server.
+ */
+export const PROJECTS_EXPANDED_KEY = `coflux_projects_expanded:${SERVER_URL}`;
+/**
  * Terminal editor-group layouts per workspace (plan 20260923-terminal-split-groups): groups, tab
  * order, active tab per group, split ratios, focused group. Local to this machine and scoped by
  * server address like the palette's recent places — workspace and task ids mean nothing elsewhere.

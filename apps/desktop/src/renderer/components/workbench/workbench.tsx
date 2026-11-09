@@ -59,6 +59,7 @@ import { createFileTabId, findFileTab, readFileTabRecords, restoreFileTabs, type
 import { useDesktopUpdateState } from "@/components/workbench/use-desktop-update";
 import { useGlobalShortcuts } from "@/components/workbench/use-global-shortcuts";
 import { useSidebarWidth } from "@/components/workbench/use-sidebar-width";
+import { readWorkspaceVisits, recordWorkspaceVisit, type WorkspaceVisitStore } from "@/components/workbench/workspace-visits";
 import type { WorkspaceLayoutActions, WorkspaceTerminalHandle } from "@/components/workbench/workspace-terminal";
 import type { FileReveal } from "@/components/workbench/changes-view";
 import {
@@ -112,6 +113,7 @@ import {
   SCREENS_KEY,
   TERMINAL_LAYOUTS_KEY,
   WORKSPACE_KEY,
+  WORKSPACE_VISITS_KEY,
   desktop,
 } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
@@ -169,6 +171,9 @@ function persistSelection(selection: WorkbenchSelection | null) {
  * unit-testable, and every read and write inside it is already guarded against storage throwing.
  */
 const RECENT_PLACES_STORE: RecentPlacesStore = { storage: localStorage, key: COMMAND_PALETTE_RECENT_KEY };
+
+/** When each workspace was last on screen (plan 20261109-sidebar-current-section): the sidebar's 「当前」 recency. */
+const WORKSPACE_VISIT_STORE: WorkspaceVisitStore = { storage: localStorage, key: WORKSPACE_VISITS_KEY };
 
 /**
  * Where the terminal editor-group layouts live (plan 20260923-terminal-split-groups). Injected into
@@ -483,6 +488,9 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const settledCreatesRef = useRef<{ workspaceId: string; taskId: string; pendingId: string }[]>([]);
   // The action dock's measured width: the top-right group's strip reserves exactly this much.
   const [dockWidth, setDockWidth] = useState(0);
+  // When each workspace was last on screen (plan 20261109-sidebar-current-section), held in state
+  // so the sidebar's 「当前」 section re-renders when a leave is recorded.
+  const [workspaceVisits, setWorkspaceVisits] = useState(() => readWorkspaceVisits(WORKSPACE_VISIT_STORE));
 
   const authState = useStore(client.store, (state) => state.authState);
   const loginError = useStore(client.store, (state) => state.loginError);
@@ -1570,6 +1578,18 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (visitedPlaceKey) recordRecentPlace(RECENT_PLACES_STORE, visitedPlaceKey);
   }, [visitedPlaceKey]);
 
+  // The sidebar's 「当前」 section (plan 20261109-sidebar-current-section) stamps a workspace when
+  // the selection moves off it — to another workspace, a device, a screen or nothing — not when it
+  // is entered: the selected workspace itself counts as on screen now, so a long stay ends with a
+  // fresh time. Keyed on the resolved id, which snapshot reconciliation leaves alone.
+  const onScreenWorkspaceId = selectedWorkspace?.id ?? null;
+  const onScreenWorkspaceRef = useRef<string | null>(null);
+  useEffect(() => {
+    const left = onScreenWorkspaceRef.current;
+    onScreenWorkspaceRef.current = onScreenWorkspaceId;
+    if (left && left !== onScreenWorkspaceId) setWorkspaceVisits(recordWorkspaceVisit(WORKSPACE_VISIT_STORE, left, Date.now()));
+  }, [onScreenWorkspaceId]);
+
   // Esc closes the changes overlay — only while nothing else that owns Esc is open (settings,
   // palette, dialogs, the notification inbox), and only when no menu or dialog holds the focus:
   // sibling capture listeners on one target cannot stop each other.
@@ -1782,6 +1802,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}
+        workspaceVisits={workspaceVisits}
         selectedDeviceId={selection?.kind === "device" ? selection.id : null}
         onSelectDevice={selectDevice}
         onImportProject={() => setImportOpen(true)}
