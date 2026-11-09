@@ -74,11 +74,14 @@ struct HomeSidebar: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(removing: .title)
         .toolbar {
-            // A fixed width: offered its ideal size, a leading item is squeezed to a sliver.
-            // Wide, the system's sidebar toggle sits before it; floating, there is none.
+            // A fixed width: offered its ideal size, a leading item is squeezed to a sliver; too
+            // wide, the bar folds both items into its overflow button (seen on the Duo,
+            // 2026-11-10, at width − 92). Measured there: ~20 pt bar margins on each side and a
+            // 48 pt settings button, so the account gets the width less 120. Wide, the system's
+            // sidebar toggle (48 pt and a gap) sits before it as well.
             ToolbarItem(placement: .topBarLeading) {
                 accountMenu
-                    .frame(width: max(100, width - (layout == .tall ? 92 : 150)), alignment: .leading)
+                    .frame(width: max(100, width - (layout == .tall ? 120 : 180)), alignment: .leading)
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .topBarTrailing) {
