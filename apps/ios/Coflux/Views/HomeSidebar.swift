@@ -21,6 +21,9 @@ struct HomeSidebar: View {
     @State private var showingSettings = false
 
     private static let wideWidth: CGFloat = 380
+    /// A row's padding inside its highlight; the highlight sits 6 pt in from the sidebar's edges.
+    private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 14)
+    private static let headerInsets = EdgeInsets(top: 12, leading: 16, bottom: 3, trailing: 14)
 
     var body: some View {
         let items = client.waitingItems
@@ -57,6 +60,11 @@ struct HomeSidebar: View {
             }
         }
         .listStyle(.plain)
+        // Dense like the rest of the page (user's call, 2026-11-10): rows as tall as their two
+        // lines plus the insets below, not the system's 44 pt minimum.
+        .environment(\.defaultMinListRowHeight, 1)
+        .listSectionSpacing(0)
+        .contentMargins(.top, 2, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .background(Theme.surface)
         // The device rows show each device's latency: measured only while the sidebar is up.
@@ -110,6 +118,7 @@ struct HomeSidebar: View {
         }
         .textCase(nil)
         .lineLimit(1)
+        .listRowInsets(Self.headerInsets)
     }
 
     private func waitingRow(_ item: WaitingItem) -> some View {
@@ -156,6 +165,7 @@ struct HomeSidebar: View {
         .buttonStyle(.plain)
         .listRowBackground(rowBackground(selected))
         .listRowSeparator(.hidden)
+        .listRowInsets(Self.rowInsets)
     }
 
     private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
@@ -198,6 +208,7 @@ struct HomeSidebar: View {
         .workspaceContextMenu(client: client, workspace: workspace)
         .listRowBackground(rowBackground(selected))
         .listRowSeparator(.hidden)
+        .listRowInsets(Self.rowInsets)
     }
 
     /// Online devices first, then by name.
@@ -258,6 +269,7 @@ struct HomeSidebar: View {
         .copyHandleContextMenu(.device, id: daemon.daemonID)
         .listRowBackground(rowBackground(navigation.selectedDeviceID == daemon.daemonID))
         .listRowSeparator(.hidden)
+        .listRowInsets(Self.rowInsets)
     }
 
     private func deviceLine(online: Bool, rtt: Double?, running: Int) -> Text {
@@ -313,9 +325,9 @@ struct HomeSidebar: View {
     }
 
     private func rowBackground(_ selected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 14)
+        RoundedRectangle(cornerRadius: 12)
             .fill(selected ? Theme.accentSurface : Color.clear)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
     }
 
     private func workspaceTitle(_ workspaceID: String) -> String? {
