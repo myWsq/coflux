@@ -50,6 +50,21 @@ import {
  * AgentSetting message. */
 export type AgentSettingRecord = { agentId: string; enabled: boolean; command: string };
 
+/** A dictation provider as stored in `account_speech_providers` / `account_speech_settings` (plan
+ * 20261109-speech-providers). */
+export type SpeechProviderId = "doubao" | "openai";
+/** One provider slot as stored: base URL and model exactly as typed (empty = the client's default)
+ * and the key ciphertext, NULL when the slot has no key. */
+export type SpeechProviderRecord = {
+  provider: SpeechProviderId;
+  baseUrl: string;
+  model: string;
+  ciphertext: string | null;
+  updatedAt: number;
+};
+/** What a slot write does with the stored key: keep it, replace it with a new ciphertext, or remove it. */
+export type SpeechKeyAction = { kind: "keep" } | { kind: "replace"; ciphertext: string } | { kind: "clear" };
+
 const MAX_SESSION_CHECKPOINTS_PER_ACCOUNT = 256;
 const MAX_SESSION_CHECKPOINT_BYTES_PER_ACCOUNT = 64 * 1024 * 1024;
 const SESSION_CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -597,29 +612,74 @@ export class Store {
     });
   }
 
-  /* ---------------------- account speech key ---------------------- */
-  /** The account's dictation API key (plan 20261108-ios-seed-asr) as stored: ciphertext only — the
-   * store never encrypts or decrypts. */
-  async getSpeechKey(accountId: AccountId): Promise<{ ciphertext: string; updatedAt: number } | undefined> {
-    const rows = await this.sql<{ ciphertext: string; updatedAt: number }[]>`
-      SELECT api_key_ciphertext AS ciphertext, updated_at FROM account_speech_keys
+  /* -------------------- account speech providers -------------------- */
+  /** The account's dictation slots and provider in use (plan 20261109-speech-providers) as stored:
+   * ciphertext only — the store never encrypts or decrypts. Slots never written are absent; an
+   * account without a settings row uses 'doubao'. */
+  async getSpeechConfig(accountId: AccountId): Promise<{ active: SpeechProviderId; providers: SpeechProviderRecord[] }> {
+    const providers = await this.sql<SpeechProviderRecord[]>`
+      SELECT provider, base_url, model, api_key_ciphertext AS ciphertext, updated_at FROM account_speech_providers
       WHERE account_id = ${accountId}
+      ORDER BY provider
     `;
-    return rows[0];
+    const settings = await this.sql<{ activeProvider: SpeechProviderId }[]>`
+      SELECT active_provider FROM account_speech_settings WHERE account_id = ${accountId}
+    `;
+    return { active: settings[0]?.activeProvider ?? "doubao", providers: [...providers] };
   }
-  /** Replace the account's key ciphertext (last write wins). */
-  async setSpeechKey(accountId: AccountId, ciphertext: string, updatedAt: number): Promise<void> {
+  /** Replace one slot's base URL and model and apply `key` to its key, in one statement (last write
+   * wins). A slot that does not exist yet is created; with `keep` it starts without a key. */
+  async setSpeechProvider(
+    accountId: AccountId,
+    provider: SpeechProviderId,
+    baseUrl: string,
+    model: string,
+    key: SpeechKeyAction,
+    updatedAt: number,
+  ): Promise<void> {
+    if (key.kind === "keep") {
+      await this.sql`
+        INSERT INTO account_speech_providers (account_id, provider, base_url, model, api_key_ciphertext, updated_at)
+        VALUES (${accountId}, ${provider}, ${baseUrl}, ${model}, NULL, ${updatedAt})
+        ON CONFLICT (account_id, provider) DO UPDATE SET
+          base_url = excluded.base_url,
+          model = excluded.model,
+          updated_at = excluded.updated_at
+      `;
+      return;
+    }
+    const ciphertext = key.kind === "replace" ? key.ciphertext : null;
     await this.sql`
-      INSERT INTO account_speech_keys (account_id, api_key_ciphertext, updated_at)
-      VALUES (${accountId}, ${ciphertext}, ${updatedAt})
-      ON CONFLICT (account_id) DO UPDATE SET
+      INSERT INTO account_speech_providers (account_id, provider, base_url, model, api_key_ciphertext, updated_at)
+      VALUES (${accountId}, ${provider}, ${baseUrl}, ${model}, ${ciphertext}, ${updatedAt})
+      ON CONFLICT (account_id, provider) DO UPDATE SET
+        base_url = excluded.base_url,
+        model = excluded.model,
         api_key_ciphertext = excluded.api_key_ciphertext,
         updated_at = excluded.updated_at
     `;
   }
-  /** Remove the account's key; a no-op when none is stored. */
-  async clearSpeechKey(accountId: AccountId): Promise<void> {
-    await this.sql`DELETE FROM account_speech_keys WHERE account_id = ${accountId}`;
+  /** Replace (a ciphertext) or remove (null) one slot's key only, keeping its base URL and model, in
+   * one statement — the pre-provider SpeechKeySet path. A slot that does not exist yet is created
+   * with an empty base URL and model. */
+  async setSpeechProviderKey(accountId: AccountId, provider: SpeechProviderId, ciphertext: string | null, updatedAt: number): Promise<void> {
+    await this.sql`
+      INSERT INTO account_speech_providers (account_id, provider, base_url, model, api_key_ciphertext, updated_at)
+      VALUES (${accountId}, ${provider}, '', '', ${ciphertext}, ${updatedAt})
+      ON CONFLICT (account_id, provider) DO UPDATE SET
+        api_key_ciphertext = excluded.api_key_ciphertext,
+        updated_at = excluded.updated_at
+    `;
+  }
+  /** Set the account's provider in use (last write wins). */
+  async setSpeechActiveProvider(accountId: AccountId, provider: SpeechProviderId, updatedAt: number): Promise<void> {
+    await this.sql`
+      INSERT INTO account_speech_settings (account_id, active_provider, updated_at)
+      VALUES (${accountId}, ${provider}, ${updatedAt})
+      ON CONFLICT (account_id) DO UPDATE SET
+        active_provider = excluded.active_provider,
+        updated_at = excluded.updated_at
+    `;
   }
 
   /* ---------------------------- devices ---------------------------- */

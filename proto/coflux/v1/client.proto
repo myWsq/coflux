@@ -234,6 +234,9 @@ message ClientToServer {
     ProjectSetArchived project_set_archived = 50;
     SpeechKeySet speech_key_set = 51;
     SpeechKeyGet speech_key_get = 52;
+    SpeechConfigSet speech_config_set = 53;
+    SpeechActiveSet speech_active_set = 54;
+    SpeechCredentialsGet speech_credentials_get = 55;
   }
 }
 
@@ -268,6 +271,11 @@ message AuthOk {
   // SpeechKeyStatus after the subscribe snapshot and accepts SpeechKeySet / SpeechKeyGet. False (an
   // older center) tells the client "not supported" apart from "no key configured yet".
   bool speech_key = 10;
+  // This center stores per-provider dictation configurations (plan 20261109-speech-providers): it
+  // sends SpeechConfigStatus after the subscribe snapshot and accepts SpeechConfigSet /
+  // SpeechActiveSet / SpeechCredentialsGet. False (an older center) means the client must not send
+  // those three requests.
+  bool speech_providers = 11;
 }
 
 message AuthError {
@@ -464,6 +472,8 @@ message ServerToClient {
     SessionMetadata session_metadata = 50;
     SpeechKeyStatus speech_key_status = 51;
     SpeechKeyValue speech_key_value = 52;
+    SpeechConfigStatus speech_config_status = 53;
+    SpeechCredentials speech_credentials = 54;
   }
 }
 
@@ -488,20 +498,24 @@ message DeviceJoinKeyCreated {
 
 // Account-level dictation API key (plan 20261108-ios-seed-asr): the Doubao speech-recognition key the
 // iOS app uses for long-press dictation. The center stores it encrypted and never broadcasts it.
-// Replace the signed-in account's key; an empty `api_key` clears it. Answered with SpeechKeyStatus
-// carrying the same request_id.
+// Since plan 20261109-speech-providers these three messages address the Doubao slot's key only (its
+// base URL and model are kept) and remain for clients older than AuthOk.speech_providers; newer
+// clients use SpeechConfigSet / SpeechCredentialsGet instead.
+// Replace the signed-in account's Doubao key; an empty `api_key` clears it. Answered with
+// SpeechKeyStatus carrying the same request_id.
 message SpeechKeySet {
   string request_id = 1;
   string api_key = 2;
 }
-// Fetch the signed-in account's key in plaintext. Answered with SpeechKeyValue, only to this
+// Fetch the signed-in account's Doubao key in plaintext. Answered with SpeechKeyValue, only to this
 // connection.
 message SpeechKeyGet {
   string request_id = 1;
 }
-// Whether the account has a key, never the key itself. Sent to the client right after the subscribe
-// snapshot (empty request_id) and, after every accepted SpeechKeySet, to every subscribed client of
-// the account (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
+// Whether the account's Doubao slot has a key, never the key itself. Sent to the client right after
+// the subscribe snapshot (empty request_id) and, after every accepted write of any speech message
+// (SpeechKeySet, SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account
+// (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
 // `error` answers a rejected write, goes only to the writer, and its `configured` / `updated_at` must
 // be ignored. `updated_at` is the last write in ms epoch, center clock (0 when not configured).
 message SpeechKeyStatus {
@@ -516,6 +530,74 @@ message SpeechKeyValue {
   string request_id = 1;
   string api_key = 2;
   string error = 3;
+}
+
+// Per-provider dictation configuration (plan 20261109-speech-providers). The account holds one slot
+// per provider (base URL, model, optional key, all stored as typed: empty means the client's
+// default) plus which provider is in use. The center stores keys encrypted and never broadcasts them.
+enum SpeechProvider {
+  SPEECH_PROVIDER_UNSPECIFIED = 0;
+  // Doubao Seed-ASR streaming recognition: base URL is the full wss:// endpoint, model is sent as
+  // X-Api-Resource-Id.
+  SPEECH_PROVIDER_DOUBAO = 1;
+  // OpenAI Realtime transcription: base URL is the https:// REST base, model is a
+  // gpt-live-transcribe model.
+  SPEECH_PROVIDER_OPENAI = 2;
+}
+// One provider's slot as broadcast: never the key itself. `updated_at` is the slot's last accepted
+// write in ms epoch, center clock, 0 for a slot never written.
+message SpeechProviderConfig {
+  SpeechProvider provider = 1;
+  string base_url = 2;
+  string model = 3;
+  bool key_configured = 4;
+  double updated_at = 5;
+}
+// Replace one provider slot's base URL and model. A non-empty `api_key` replaces the key,
+// `clear_api_key` removes it, neither keeps it; both at once is refused. Answered with
+// SpeechConfigStatus carrying the same request_id.
+message SpeechConfigSet {
+  string request_id = 1;
+  SpeechProvider provider = 2;
+  string base_url = 3;
+  string model = 4;
+  string api_key = 5;
+  bool clear_api_key = 6;
+}
+// Choose the account's provider in use. A provider without a key can be active. Answered with
+// SpeechConfigStatus carrying the same request_id.
+message SpeechActiveSet {
+  string request_id = 1;
+  SpeechProvider provider = 2;
+}
+// Fetch one provider slot's stored values and plaintext key. Answered with SpeechCredentials, only
+// to this connection.
+message SpeechCredentialsGet {
+  string request_id = 1;
+  SpeechProvider provider = 2;
+}
+// The account's speech configuration, never a key. Sent to the client right after the subscribe
+// snapshot (empty request_id) and, after every accepted write of any speech message (SpeechKeySet,
+// SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account (request_id of that
+// write; also sent directly to an unsubscribed writer). A non-empty `error` answers a rejected
+// SpeechConfigSet / SpeechActiveSet, goes only to the writer, and its other fields must be ignored.
+// `providers` always lists both providers, in enum order.
+message SpeechConfigStatus {
+  SpeechProvider active = 1;
+  repeated SpeechProviderConfig providers = 2;
+  string request_id = 3;
+  string error = 4;
+}
+// Answer to SpeechCredentialsGet, only to the requesting connection. Base URL and model are the
+// stored values (empty means the client's default). Empty `api_key` with empty `error` means the slot
+// has no key; a non-empty `error` means the request was refused or the stored key could not be read.
+message SpeechCredentials {
+  string request_id = 1;
+  SpeechProvider provider = 2;
+  string base_url = 3;
+  string model = 4;
+  string api_key = 5;
+  string error = 6;
 }
 
 // Bounded newest-first history. Zero before_sequence requests the first page.

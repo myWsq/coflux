@@ -3913,7 +3913,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -3994,6 +3994,12 @@ pub mod client_to_server {
         SpeechKeySet(super::SpeechKeySet),
         #[prost(message, tag="52")]
         SpeechKeyGet(super::SpeechKeyGet),
+        #[prost(message, tag="53")]
+        SpeechConfigSet(super::SpeechConfigSet),
+        #[prost(message, tag="54")]
+        SpeechActiveSet(super::SpeechActiveSet),
+        #[prost(message, tag="55")]
+        SpeechCredentialsGet(super::SpeechCredentialsGet),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -4035,6 +4041,12 @@ pub struct AuthOk {
     /// older center) tells the client "not supported" apart from "no key configured yet".
     #[prost(bool, tag="10")]
     pub speech_key: bool,
+    /// This center stores per-provider dictation configurations (plan 20261109-speech-providers): it
+    /// sends SpeechConfigStatus after the subscribe snapshot and accepts SpeechConfigSet /
+    /// SpeechActiveSet / SpeechCredentialsGet. False (an older center) means the client must not send
+    /// those three requests.
+    #[prost(bool, tag="11")]
+    pub speech_providers: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -4233,7 +4245,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4318,6 +4330,10 @@ pub mod server_to_client {
         SpeechKeyStatus(super::SpeechKeyStatus),
         #[prost(message, tag="52")]
         SpeechKeyValue(super::SpeechKeyValue),
+        #[prost(message, tag="53")]
+        SpeechConfigStatus(super::SpeechConfigStatus),
+        #[prost(message, tag="54")]
+        SpeechCredentials(super::SpeechCredentials),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4348,8 +4364,11 @@ pub struct DeviceJoinKeyCreated {
 }
 /// Account-level dictation API key (plan 20261108-ios-seed-asr): the Doubao speech-recognition key the
 /// iOS app uses for long-press dictation. The center stores it encrypted and never broadcasts it.
-/// Replace the signed-in account's key; an empty `api_key` clears it. Answered with SpeechKeyStatus
-/// carrying the same request_id.
+/// Since plan 20261109-speech-providers these three messages address the Doubao slot's key only (its
+/// base URL and model are kept) and remain for clients older than AuthOk.speech_providers; newer
+/// clients use SpeechConfigSet / SpeechCredentialsGet instead.
+/// Replace the signed-in account's Doubao key; an empty `api_key` clears it. Answered with
+/// SpeechKeyStatus carrying the same request_id.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SpeechKeySet {
     #[prost(string, tag="1")]
@@ -4357,16 +4376,17 @@ pub struct SpeechKeySet {
     #[prost(string, tag="2")]
     pub api_key: ::prost::alloc::string::String,
 }
-/// Fetch the signed-in account's key in plaintext. Answered with SpeechKeyValue, only to this
+/// Fetch the signed-in account's Doubao key in plaintext. Answered with SpeechKeyValue, only to this
 /// connection.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SpeechKeyGet {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
 }
-/// Whether the account has a key, never the key itself. Sent to the client right after the subscribe
-/// snapshot (empty request_id) and, after every accepted SpeechKeySet, to every subscribed client of
-/// the account (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
+/// Whether the account's Doubao slot has a key, never the key itself. Sent to the client right after
+/// the subscribe snapshot (empty request_id) and, after every accepted write of any speech message
+/// (SpeechKeySet, SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account
+/// (request_id of that write; also sent directly to an unsubscribed writer). A non-empty
 /// `error` answers a rejected write, goes only to the writer, and its `configured` / `updated_at` must
 /// be ignored. `updated_at` is the last write in ms epoch, center clock (0 when not configured).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4389,6 +4409,92 @@ pub struct SpeechKeyValue {
     #[prost(string, tag="2")]
     pub api_key: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+}
+/// One provider's slot as broadcast: never the key itself. `updated_at` is the slot's last accepted
+/// write in ms epoch, center clock, 0 for a slot never written.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpeechProviderConfig {
+    #[prost(enumeration="SpeechProvider", tag="1")]
+    pub provider: i32,
+    #[prost(string, tag="2")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub key_configured: bool,
+    #[prost(double, tag="5")]
+    pub updated_at: f64,
+}
+/// Replace one provider slot's base URL and model. A non-empty `api_key` replaces the key,
+/// `clear_api_key` removes it, neither keeps it; both at once is refused. Answered with
+/// SpeechConfigStatus carrying the same request_id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechConfigSet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SpeechProvider", tag="2")]
+    pub provider: i32,
+    #[prost(string, tag="3")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub api_key: ::prost::alloc::string::String,
+    #[prost(bool, tag="6")]
+    pub clear_api_key: bool,
+}
+/// Choose the account's provider in use. A provider without a key can be active. Answered with
+/// SpeechConfigStatus carrying the same request_id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechActiveSet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SpeechProvider", tag="2")]
+    pub provider: i32,
+}
+/// Fetch one provider slot's stored values and plaintext key. Answered with SpeechCredentials, only
+/// to this connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechCredentialsGet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SpeechProvider", tag="2")]
+    pub provider: i32,
+}
+/// The account's speech configuration, never a key. Sent to the client right after the subscribe
+/// snapshot (empty request_id) and, after every accepted write of any speech message (SpeechKeySet,
+/// SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account (request_id of that
+/// write; also sent directly to an unsubscribed writer). A non-empty `error` answers a rejected
+/// SpeechConfigSet / SpeechActiveSet, goes only to the writer, and its other fields must be ignored.
+/// `providers` always lists both providers, in enum order.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpeechConfigStatus {
+    #[prost(enumeration="SpeechProvider", tag="1")]
+    pub active: i32,
+    #[prost(message, repeated, tag="2")]
+    pub providers: ::prost::alloc::vec::Vec<SpeechProviderConfig>,
+    #[prost(string, tag="3")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Answer to SpeechCredentialsGet, only to the requesting connection. Base URL and model are the
+/// stored values (empty means the client's default). Empty `api_key` with empty `error` means the slot
+/// has no key; a non-empty `error` means the request was refused or the stored key could not be read.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechCredentials {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(enumeration="SpeechProvider", tag="2")]
+    pub provider: i32,
+    #[prost(string, tag="3")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub api_key: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
     pub error: ::prost::alloc::string::String,
 }
 /// Bounded newest-first history. Zero before_sequence requests the first page.
@@ -4485,6 +4591,42 @@ pub struct AgentSettingsUpdated {
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub error: ::prost::alloc::string::String,
+}
+/// Per-provider dictation configuration (plan 20261109-speech-providers). The account holds one slot
+/// per provider (base URL, model, optional key, all stored as typed: empty means the client's
+/// default) plus which provider is in use. The center stores keys encrypted and never broadcasts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SpeechProvider {
+    Unspecified = 0,
+    /// Doubao Seed-ASR streaming recognition: base URL is the full wss:// endpoint, model is sent as
+    /// X-Api-Resource-Id.
+    Doubao = 1,
+    /// OpenAI Realtime transcription: base URL is the https:// REST base, model is a
+    /// gpt-live-transcribe model.
+    Openai = 2,
+}
+impl SpeechProvider {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SPEECH_PROVIDER_UNSPECIFIED",
+            Self::Doubao => "SPEECH_PROVIDER_DOUBAO",
+            Self::Openai => "SPEECH_PROVIDER_OPENAI",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SPEECH_PROVIDER_UNSPECIFIED" => Some(Self::Unspecified),
+            "SPEECH_PROVIDER_DOUBAO" => Some(Self::Doubao),
+            "SPEECH_PROVIDER_OPENAI" => Some(Self::Openai),
+            _ => None,
+        }
+    }
 }
 // ===== Daemon → Server 载荷 =====
 
