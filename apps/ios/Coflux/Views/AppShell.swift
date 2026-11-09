@@ -149,6 +149,9 @@ struct AppShell: View {
         @Bindable var navigation = navigation
         return NavigationSplitView(columnVisibility: $navigation.overlayVisibility) {
             HomeSidebar(client: client)
+                // Removed from the sidebar column, where SwiftUI reads it: applied to the split
+                // view, the system toggle stayed beside ours on the Duo (2026-11-10).
+                .toolbar(removing: .sidebarToggle)
                 .navigationSplitViewColumnWidth(
                     min: Self.sidebarMinWidth,
                     ideal: Self.overlaySidebarWidth,
@@ -158,7 +161,6 @@ struct AppShell: View {
             detailColumn
         }
         .navigationSplitViewStyle(.prominentDetail)
-        .toolbar(removing: .sidebarToggle)
     }
 
     @ViewBuilder
@@ -231,10 +233,27 @@ struct SidebarToggleButton: View {
     @Environment(SceneNavigation.self) private var navigation
 
     var body: some View {
-        Button("显示边栏", systemImage: "sidebar.leading") {
+        let count = client.waitingCount
+        Button {
             navigation.toggleOverlaySidebar()
+        } label: {
+            Image(systemName: "sidebar.leading")
+                // The count is drawn here: `badge` is a list-row and tab-item modifier, and a
+                // toolbar button ignores it.
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 11, weight: .heavy).monospacedDigit())
+                            .foregroundStyle(Theme.primaryForeground)
+                            .padding(.horizontal, 5)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background(Theme.warning, in: Capsule())
+                            .offset(x: 13, y: -12)
+                    }
+                }
         }
-        .badge(client.waitingCount)
+        .accessibilityLabel("显示边栏")
+        .accessibilityValue(count > 0 ? "\(count) 个待处理" : "")
     }
 }
 
