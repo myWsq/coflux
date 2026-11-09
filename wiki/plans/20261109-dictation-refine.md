@@ -697,3 +697,23 @@ Out of scope:
 - The centre needs `COFLUX_EXECUTOR_KEYS` (configured in production) to store the refine key.
 - Correction calls are billed to whatever provider key the user stores; nothing in the centre calls
   the provider.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-09
+- Mode: subagent(opus), one package (M1 produces the generated contract every other milestone builds on); one revision round.
+- Commits: `b0b9fac3..123cf3f6` (`a23dde3f` protocol, `9a412a07` centre + migration 13, `a904c86b` TS client, `84ec61fa` desktop, `df97c442` Swift client, `56cc0a07` iOS context/refiner/session/overlay, `19557c58` iOS sheet, `123cf3f6` round 1)
+- Verification run by the orchestrator: `buf lint`, regeneration identical to the committed code, `buf breaking` against `23ca7cc4` (exit 0), `cargo build` (no warnings), `cargo test -p coflux-protocol`, server `tsc`, desktop typecheck + tests + lint + build, `swift test` 103/103, iOS device build `BUILD SUCCEEDED` (round 1 fixed a Swift 6 sending-closure error in `DictationRefiner.swift`) and test build `TEST BUILD SUCCEEDED`, black-box 95/95.
+- Acceptance:
+  - Locator scripts on this Mac's real transcripts: header intact, zero tool-output lines in either body, bodies at their 256 KiB / 1 MiB bounds, a non-digit size refused with exit 4. On a tool-heavy Claude session the 256 KiB body parses to ~2300 estimated tokens of prose (the old unfiltered 256 KiB tail of the same file: ~1000), so the 1500 budget now fills; the 1 MiB body carries ~10.7k tokens of prose plus 84 tool calls. The repository listing of this repo is 98 KB (1852 files).
+  - Centre wire round trip (throwaway script, two clients): 29/29 — refusals (enabled without fields, `http:`, query string, model with a space, key + clear) go to the writer only and store nothing; accepted writes reach the second client with `refine` and never a key; credentials go only to the requester; keep-key, clear, a #129 engine write and the old `speechKeyGet` all behave; without `COFLUX_EXECUTOR_KEYS` a key write is refused while field writes and clearing succeed.
+  - `DictationRefiner.swift` compiled into a macOS probe against OpenAI `gpt-4.1-mini` (synthetic conversation, this repo's file names): 瑞贝斯/妹恩 → rebase/main, tail cut/dirty → tailcat/DERP, seed a s r provider → SeedASRProvider, work tree → worktree; a question was corrected, not answered; a plain sentence came back unchanged; a bogus key → not refined. Latency with ~3k tokens of terms: 1.6–3.0 s cold, 1.2–1.8 s warm.
+- Deviations:
+  - (revised at verification, D12) the correction request's `<terms>` are repository terms only: conversation-derived terms are newest-first and would change the prefix on every turn, defeating provider prefix caching, and the conversation itself is already in the request. The recognition term sentence (D11) still merges conversation terms first.
+  - The recognition context past its deadline uses whatever the reads delivered (workspace sentence plus any repository terms) instead of the workspace sentence alone.
+  - No `project.pbxproj` edit: the Coflux target is a synchronized folder group.
+  - The iOS sheet saves the 识别后整理 fields with its existing toolbar 保存 and offers 「清除 API Key」, matching how the sheet already saves the engine groups.
+- Follow-ups:
+  - Latency: the cold first request with a full ~24k-token context may exceed the 3 s bound and show 未整理; measure on the Duo with the provider actually chosen (Ark is likely closer than OpenAI from China) before tuning the budget or the bound.
+  - Casing is not always restored (`tailcat` rather than `Tailcat`); a terms list ordered by relevance, or the conversation's own spelling, may help — judge from real use first.
+  - The iPhone Duo walkthrough is pending the user, after the centre is deployed.
