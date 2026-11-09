@@ -23,18 +23,16 @@ struct AppShell: View {
             let layout = ShellLayout.choose(for: window)
             Group {
                 switch layout {
-                case .compact:
-                    tabLayout
                 case .split:
                     splitLayout(fold: Self.bookFold(in: proxy))
-                case .tall:
-                    overlayLayout
+                case .compact, .tall:
+                    overlayLayout(compact: layout == .compact)
                 }
             }
             .environment(\.shellLayout, layout)
             // Nothing to show yet in a tall window: the floating sidebar comes out by itself.
             .onChange(of: layout, initial: true) { _, layout in
-                if layout == .tall, navigation.tab == .home, navigation.workspaceID == nil {
+                if layout.floatsSidebar, navigation.tab == .home, navigation.workspaceID == nil {
                     navigation.overlayVisibility = .all
                 }
             }
@@ -145,7 +143,7 @@ struct AppShell: View {
     /// on the dimmed terminal — the floating sidebar has no button of its own (user's call,
     /// 2026-11-09). The system's sidebar toggle is replaced by `SidebarToggleButton`, which
     /// carries the waiting count the 首页 tab used to.
-    private var overlayLayout: some View {
+    private func overlayLayout(compact: Bool) -> some View {
         @Bindable var navigation = navigation
         return NavigationSplitView(columnVisibility: $navigation.overlayVisibility) {
             HomeSidebar(client: client)
@@ -161,6 +159,11 @@ struct AppShell: View {
             detailColumn
         }
         .navigationSplitViewStyle(.prominentDetail)
+        // A compact window (the outer display) would collapse the split view into a stack — the
+        // old home → workspace push. Told the width is regular, it keeps the floating sidebar.
+        .transformEnvironment(\.horizontalSizeClass) { sizeClass in
+            if compact { sizeClass = .regular }
+        }
     }
 
     @ViewBuilder
@@ -271,7 +274,7 @@ private struct SidebarToggleItem: ViewModifier {
 
     func body(content: Content) -> some View {
         content.toolbar {
-            if layout == .tall {
+            if layout.floatsSidebar {
                 ToolbarItem(placement: .topBarLeading) {
                     SidebarToggleButton(client: client)
                 }

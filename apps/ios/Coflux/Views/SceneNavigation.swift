@@ -20,6 +20,10 @@ enum ShellLayout: Equatable, Sendable {
     static let largeLongSide: CGFloat = 760
     static let largeShortSide: CGFloat = 560
 
+    /// The sidebar floats over the page and is called up on demand (compact and tall); side by
+    /// side only in the split layout.
+    var floatsSidebar: Bool { self != .split }
+
     static func choose(for window: CGSize) -> ShellLayout {
         let long = max(window.width, window.height)
         let short = min(window.width, window.height)

@@ -748,7 +748,7 @@ struct WorkspaceDetailView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if layout == .tall {
+        if layout.floatsSidebar {
             // Where the compact layout's back button sits: the floating sidebar's button.
             ToolbarItem(placement: .topBarLeading) {
                 SidebarToggleButton(client: client)
