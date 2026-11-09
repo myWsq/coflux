@@ -3913,7 +3913,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -4000,6 +4000,10 @@ pub mod client_to_server {
         SpeechActiveSet(super::SpeechActiveSet),
         #[prost(message, tag="55")]
         SpeechCredentialsGet(super::SpeechCredentialsGet),
+        #[prost(message, tag="56")]
+        SpeechRefineSet(super::SpeechRefineSet),
+        #[prost(message, tag="57")]
+        SpeechRefineCredentialsGet(super::SpeechRefineCredentialsGet),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -4047,6 +4051,12 @@ pub struct AuthOk {
     /// those three requests.
     #[prost(bool, tag="11")]
     pub speech_providers: bool,
+    /// This center stores the account's dictation correction configuration (plan
+    /// 20261109-dictation-refine): every SpeechConfigStatus without an error carries `refine`, and it
+    /// accepts SpeechRefineSet / SpeechRefineCredentialsGet. False (an older center) tells the client
+    /// "not supported" apart from "not configured" and means it must not send those two requests.
+    #[prost(bool, tag="12")]
+    pub speech_refine: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthError {
@@ -4245,7 +4255,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4334,6 +4344,8 @@ pub mod server_to_client {
         SpeechConfigStatus(super::SpeechConfigStatus),
         #[prost(message, tag="54")]
         SpeechCredentials(super::SpeechCredentials),
+        #[prost(message, tag="55")]
+        SpeechRefineCredentials(super::SpeechRefineCredentials),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4467,7 +4479,8 @@ pub struct SpeechCredentialsGet {
 /// SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account (request_id of that
 /// write; also sent directly to an unsubscribed writer). A non-empty `error` answers a rejected
 /// SpeechConfigSet / SpeechActiveSet, goes only to the writer, and its other fields must be ignored.
-/// `providers` always lists both providers, in enum order.
+/// `providers` always lists both providers, in enum order. Since plan 20261109-dictation-refine the
+/// status also answers SpeechRefineSet (same rules) and, without an error, always carries `refine`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SpeechConfigStatus {
     #[prost(enumeration="SpeechProvider", tag="1")]
@@ -4478,6 +4491,8 @@ pub struct SpeechConfigStatus {
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub error: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="5")]
+    pub refine: ::core::option::Option<SpeechRefineConfig>,
 }
 /// Answer to SpeechCredentialsGet, only to the requesting connection. Base URL and model are the
 /// stored values (empty means the client's default). Empty `api_key` with empty `error` means the slot
@@ -4495,6 +4510,67 @@ pub struct SpeechCredentials {
     #[prost(string, tag="5")]
     pub api_key: ::prost::alloc::string::String,
     #[prost(string, tag="6")]
+    pub error: ::prost::alloc::string::String,
+}
+/// Dictation correction configuration (plan 20261109-dictation-refine): an optional account-level
+/// OpenAI-compatible chat model the iOS app sends the recogniser's final text to, so it corrects
+/// misheard terms. It is its own record, never a SpeechProvider value. The center stores the key
+/// encrypted and never broadcasts it.
+/// The record as broadcast inside SpeechConfigStatus: never the key itself. `updated_at` is the last
+/// accepted write in ms epoch, center clock, 0 when never written (disabled and unconfigured).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SpeechRefineConfig {
+    #[prost(bool, tag="1")]
+    pub enabled: bool,
+    #[prost(string, tag="2")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub key_configured: bool,
+    #[prost(double, tag="5")]
+    pub updated_at: f64,
+}
+/// Replace the correction switch, base URL and model. As in SpeechConfigSet, a non-empty `api_key`
+/// replaces the key, `clear_api_key` removes it, neither keeps it; both at once is refused. Enabling
+/// with an empty base URL or model is refused. Answered with SpeechConfigStatus carrying the same
+/// request_id.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechRefineSet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub enabled: bool,
+    #[prost(string, tag="3")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub api_key: ::prost::alloc::string::String,
+    #[prost(bool, tag="6")]
+    pub clear_api_key: bool,
+}
+/// Fetch the correction record's stored values and plaintext key. Answered with
+/// SpeechRefineCredentials, only to this connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechRefineCredentialsGet {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+/// Answer to SpeechRefineCredentialsGet, only to the requesting connection; the only message that
+/// carries the correction key. Empty `api_key` with empty `error` means no key is stored; a non-empty
+/// `error` means the request was refused or the stored key could not be read.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechRefineCredentials {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub base_url: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub api_key: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
     pub error: ::prost::alloc::string::String,
 }
 /// Bounded newest-first history. Zero before_sequence requests the first page.

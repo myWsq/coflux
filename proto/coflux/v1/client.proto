@@ -237,6 +237,8 @@ message ClientToServer {
     SpeechConfigSet speech_config_set = 53;
     SpeechActiveSet speech_active_set = 54;
     SpeechCredentialsGet speech_credentials_get = 55;
+    SpeechRefineSet speech_refine_set = 56;
+    SpeechRefineCredentialsGet speech_refine_credentials_get = 57;
   }
 }
 
@@ -276,6 +278,11 @@ message AuthOk {
   // SpeechActiveSet / SpeechCredentialsGet. False (an older center) means the client must not send
   // those three requests.
   bool speech_providers = 11;
+  // This center stores the account's dictation correction configuration (plan
+  // 20261109-dictation-refine): every SpeechConfigStatus without an error carries `refine`, and it
+  // accepts SpeechRefineSet / SpeechRefineCredentialsGet. False (an older center) tells the client
+  // "not supported" apart from "not configured" and means it must not send those two requests.
+  bool speech_refine = 12;
 }
 
 message AuthError {
@@ -474,6 +481,7 @@ message ServerToClient {
     SpeechKeyValue speech_key_value = 52;
     SpeechConfigStatus speech_config_status = 53;
     SpeechCredentials speech_credentials = 54;
+    SpeechRefineCredentials speech_refine_credentials = 55;
   }
 }
 
@@ -581,12 +589,14 @@ message SpeechCredentialsGet {
 // SpeechConfigSet, SpeechActiveSet), to every subscribed client of the account (request_id of that
 // write; also sent directly to an unsubscribed writer). A non-empty `error` answers a rejected
 // SpeechConfigSet / SpeechActiveSet, goes only to the writer, and its other fields must be ignored.
-// `providers` always lists both providers, in enum order.
+// `providers` always lists both providers, in enum order. Since plan 20261109-dictation-refine the
+// status also answers SpeechRefineSet (same rules) and, without an error, always carries `refine`.
 message SpeechConfigStatus {
   SpeechProvider active = 1;
   repeated SpeechProviderConfig providers = 2;
   string request_id = 3;
   string error = 4;
+  SpeechRefineConfig refine = 5;
 }
 // Answer to SpeechCredentialsGet, only to the requesting connection. Base URL and model are the
 // stored values (empty means the client's default). Empty `api_key` with empty `error` means the slot
@@ -598,6 +608,47 @@ message SpeechCredentials {
   string model = 4;
   string api_key = 5;
   string error = 6;
+}
+
+// Dictation correction configuration (plan 20261109-dictation-refine): an optional account-level
+// OpenAI-compatible chat model the iOS app sends the recogniser's final text to, so it corrects
+// misheard terms. It is its own record, never a SpeechProvider value. The center stores the key
+// encrypted and never broadcasts it.
+// The record as broadcast inside SpeechConfigStatus: never the key itself. `updated_at` is the last
+// accepted write in ms epoch, center clock, 0 when never written (disabled and unconfigured).
+message SpeechRefineConfig {
+  bool enabled = 1;
+  string base_url = 2;
+  string model = 3;
+  bool key_configured = 4;
+  double updated_at = 5;
+}
+// Replace the correction switch, base URL and model. As in SpeechConfigSet, a non-empty `api_key`
+// replaces the key, `clear_api_key` removes it, neither keeps it; both at once is refused. Enabling
+// with an empty base URL or model is refused. Answered with SpeechConfigStatus carrying the same
+// request_id.
+message SpeechRefineSet {
+  string request_id = 1;
+  bool enabled = 2;
+  string base_url = 3;
+  string model = 4;
+  string api_key = 5;
+  bool clear_api_key = 6;
+}
+// Fetch the correction record's stored values and plaintext key. Answered with
+// SpeechRefineCredentials, only to this connection.
+message SpeechRefineCredentialsGet {
+  string request_id = 1;
+}
+// Answer to SpeechRefineCredentialsGet, only to the requesting connection; the only message that
+// carries the correction key. Empty `api_key` with empty `error` means no key is stored; a non-empty
+// `error` means the request was refused or the stored key could not be read.
+message SpeechRefineCredentials {
+  string request_id = 1;
+  string base_url = 2;
+  string model = 3;
+  string api_key = 4;
+  string error = 5;
 }
 
 // Bounded newest-first history. Zero before_sequence requests the first page.
