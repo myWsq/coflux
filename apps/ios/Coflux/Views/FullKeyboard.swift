@@ -302,7 +302,8 @@ final class FullKeyBlockView: UIView {
         let span: Int
     }
 
-    private static let slots: [Slot] = rows.enumerated().flatMap { row, items in
+    private static let slots: [Slot] = rows.enumerated().flatMap { entry -> [Slot] in
+        let (row, items) = entry
         var column = 0
         var slots: [Slot] = []
         for item in items {
