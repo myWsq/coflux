@@ -221,7 +221,7 @@ ssh root@prod-jp 'mkdir -p /opt/coflux-web-frozen \
 
 Then remove leftover `web` / `mobile` directories under `/opt/coflux/apps`. Frozen bundles still require exact build-ID admission; plan 105 changed only `client_kind=desktop`. Move `COFLUX_BUILD_ID_FILE` with them. Unreadable files are silently ignored: an empty allow-set with unset `COFLUX_BUILD_ID` skips browser version checks entirely, accepting any build ID. It does not crash, but removes admission enforcement.
 
-**Desktop admission (plan 105)** uses control-protocol version, not build ID. Production need not match client-release SHA and does not disconnect online desktop versions. Only breaking protocols require desktop release before deployment; see [RELEASING.md](RELEASING.md).
+Desktop admission does not use build IDs; see [Desktop admission](#desktop-admission-plan-105) below.
 
 For Caddy changes: edit, run `caddy validate`, then `systemctl reload caddy`. On prod-jp, first load systemd's environment with `set -a; . /etc/caddy/cloudflare.env; set +a`; otherwise validation falsely reports `API token '' appears invalid`.
 
@@ -235,6 +235,14 @@ curl -i --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
   https://app.coflux.dev/client                                      # 101
 ssh root@prod-bj 'curl -sS -o /dev/null -w "ttfb=%{time_starttransfer}\n" https://app.coflux.dev/'
 ```
+
+## Desktop admission (plan 105)
+
+Moved here from RELEASING.md. Desktop admission uses the control-plane protocol version, not build ID, independently of production deployment. Desktop login reports `client_kind=desktop` and `control_protocol_version`, using `CONTROL_PROTOCOL_VERSION` from `packages/protocol`. The center enforces control protocol version 2 for every client and worker, with an additional configurable Desktop floor through `COFLUX_MIN_CONTROL_PROTOCOL_VERSION` (default 2). A lower environment value cannot bypass the global floor. Build IDs identify builds but do not govern desktop admission. Compatible web/mobile clients additionally retain exact build-ID admission; the frozen version-1 clients require an upgrade, with `COFLUX_BUILD_ID_FILE` pointing to the frozen dist (see [Frozen web clients](#frozen-web-clients-plan-106)). Desktop distribution has release delays; the initial same-SHA desktop/production lockstep model proved unusable on launch day.
+
+- Production need not match the client-release SHA: routine deployments **do not** disconnect older desktop versions.
+- For breaking protocol changes, increment `CONTROL_PROTOCOL_VERSION` and raise the server minimum default accordingly (an environment override can serve emergencies). **Release desktop first, then deploy production.** Older desktop versions show Update Required and trigger automatic updates. CI's `buf breaking` gates compatibility; changes it accepts need no protocol-version increment.
+- Update Required appears **only** for an outdated protocol, not a disconnection. The app neither reconnects nor reloads; it remains there until a new version is installed. See [RELEASING.md](RELEASING.md#admission-and-desktop-updates) for the update checks.
 
 ## Sign in with GitHub or Google (plan 20260923)
 
@@ -282,6 +290,19 @@ The relay key locations above belong to the pre-migration inventory. Native DERP
 **Ingress routing** (current: Cloudflare proxy → prod-jp, since 2026-10-09): the four origin sites carry DNS-01 certificates, so ingress changes are DNS-only. Edit the four A records with the zone token in prod-jp's `/etc/caddy/cloudflare.env` (run the API calls on prod-jp so the token never leaves it). Proxied origin changes apply almost at once; leaving proxied for DNS-only takes the roughly 300-second TTL, and Surge on the owner's Mac may need `POST /v1/dns/flush`.
 
 **Code**: check out the previous tag, reinstall dependencies, and restart server. Frozen web builds do not participate.
+
+## Central-host prerequisite: synchronized clocks
+
+Moved here from RELEASING.md. The **center** computes online-lease `expiresAt` as `now + config.localLeaseTtlMs`, default 45 seconds. The **daemon** validates it in `crates/runtime/src/local_auth.rs`, `validate_lease`, without skew tolerance. If the center trails the daemon by more than 45 seconds, every lease arrives expired. The daemon logs the literal diagnostic `local lease 安装被拒: lease 已过期`, and direct-path RPC/lifecycle scopes fail. Offline grants still cover session read/control, so `cofluxd doctor` can remain green and cannot rule out this fault.
+
+Observed on prod-jp on 2026-07-25: `timedatectl` showed `System clock synchronized: no` and NTP service `n/a`; system time lagged RTC/real time by 78 seconds. Fix:
+
+```sh
+apt-get install -y systemd-timesyncd && timedatectl set-ntp true
+timedatectl   # Confirm System clock synchronized: yes
+```
+
+Check this before bringing a new central host online.
 
 ## Pitfalls
 
