@@ -22,7 +22,6 @@ import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 import { projectWorkspacesInOrder, visibleProjects } from "@/components/workbench/workspace-order";
-import type { WorkspaceVisits } from "@/components/workbench/workspace-visits";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
 import { PROJECTS_EXPANDED_KEY } from "@/config";
 import { cn } from "@/lib/utils";
@@ -303,8 +302,6 @@ type SidebarProps = {
   client: CofluxClient;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
-  /** When each workspace was last on screen (plan 20261109-sidebar-current-section), for the 「当前」 section. */
-  workspaceVisits: WorkspaceVisits;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
   selectedDeviceId: string | null;
   onSelectDevice: (daemonId: string) => void;
