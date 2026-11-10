@@ -35,6 +35,9 @@ enum Theme {
     /// Agent turn finished ("说完了"): the blue of the desktop terminal theme (ANSI blue in
     /// terminal-pane.tsx, the same value as `webAnsiPalette[4]` in TerminalHostView).
     static let info = Color(rgb: 0x6B9BD1)
+    /// The microphone is listening: the system's orange recording dot (the full keyboard's space
+    /// key while talking, mockup `--mic`).
+    static let microphone = Color(rgb: 0xFF9F0A)
 
     // 终端（SwiftTerm 用 UIColor；真相源 = web terminal-pane.tsx 的 xterm theme）
     static let terminalUIColor = UIColor(red: 0x0A / 255, green: 0x0A / 255, blue: 0x0A / 255, alpha: 1)
@@ -66,6 +69,25 @@ enum Theme {
         static let key = Font.system(.subheadline, design: .monospaced).weight(.semibold)
         /// Dictation transcript, mockup 18 pt
         static let transcript = Font.title3
+
+        /// The full keyboard's caps, drawn in UIKit (`FullKeyBlockView`). Fixed sizes, like the
+        /// brand mark: the keys sit on a fixed-height grid and, like the system keyboard's, do not
+        /// follow Dynamic Type. Sizes from the mockup `20261110-ios-inner-tall-keyboard-mockup`.
+        @MainActor
+        enum FullKeyboard {
+            /// A letter, mockup 19 pt
+            static let letter = UIFont.systemFont(ofSize: 19, weight: .medium)
+            /// The large character of a number or symbol key, mockup 17 pt
+            static let character = UIFont.systemFont(ofSize: 17, weight: .medium)
+            /// The small character above it, mockup 11.5 pt
+            static let alternate = UIFont.systemFont(ofSize: 11.5, weight: .regular)
+            /// A worded function key (tab, ctrl), mockup 13.5 pt mono
+            static let function = UIFont.monospacedSystemFont(ofSize: 13.5, weight: .semibold)
+            /// A one-glyph function key (⌫ ⏎ ⇧ ⇪ ⌥ and the arrows), mockup 19 pt
+            static let symbol = UIFont.systemFont(ofSize: 19, weight: .medium)
+            /// The space key's 按住说话, mockup 13 pt
+            static let hint = UIFont.systemFont(ofSize: 13, weight: .medium)
+        }
     }
 
     /// Shapes and sizes of the Duo redesign (mockup "布局规格").

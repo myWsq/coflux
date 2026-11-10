@@ -142,6 +142,8 @@ struct KeyCap: View {
     var systemImage: String?
     var style: KeyStyle = .normal
     var height: CGFloat = Theme.Metrics.keyHeight
+    /// The function keys' darker surface (the full keyboard's Claude row) instead of the input fill.
+    var functionSurface = false
 
     var body: some View {
         Group {
@@ -173,7 +175,7 @@ struct KeyCap: View {
 
     private var background: Color {
         switch style {
-        case .normal, .destructive: Theme.input
+        case .normal, .destructive: functionSurface ? Theme.secondarySurface : Theme.input
         case .enter: Theme.primary
         }
     }
@@ -202,13 +204,14 @@ struct TerminalKey: View {
     var systemImage: String?
     var style: KeyStyle = .normal
     var height: CGFloat = Theme.Metrics.keyHeight
+    var functionSurface = false
     let bytes: () -> String
 
     var body: some View {
         Button {
             sender.press(bytes())
         } label: {
-            KeyCap(label: label, systemImage: systemImage, style: style, height: height)
+            KeyCap(label: label, systemImage: systemImage, style: style, height: height, functionSurface: functionSurface)
         }
         .buttonStyle(KeyPressStyle())
     }
@@ -229,8 +232,9 @@ struct RepeatKey: View {
     /// How far the finger may wander before the touch counts as a swipe: the dock's drag
     /// threshold, so the key gives up exactly when the extra keys start to follow.
     private static let slop: CGFloat = 10
-    private static let holdDelay: Duration = .milliseconds(350)
-    private static let repeatInterval: TimeInterval = 0.08
+    /// Also the full keyboard's repeat timing (`FullKeyBlockView`).
+    static let holdDelay: Duration = .milliseconds(350)
+    static let repeatInterval: TimeInterval = 0.08
 
     private enum Phase { case idle, pressed, repeating, cancelled }
 
@@ -369,10 +373,6 @@ struct TerminalInputArea: View {
         TerminalKeySender(client: client, task: task)
     }
 
-    private var agent: Coflux_V1_SessionAgentRef? {
-        task.flatMap { client.agent(forTask: $0) }
-    }
-
     private var pendingSecret: SecretRequestInfo? {
         task.flatMap { client.pendingSecretRequests(taskID: $0.id).first }
     }
@@ -472,44 +472,8 @@ struct TerminalInputArea: View {
 
     // MARK: Notice bar
 
-    @ViewBuilder
     private var notice: some View {
-        if let secret = pendingSecret {
-            Button(action: onOpenSecret) {
-                noticeBar(
-                    mark: .secret,
-                    title: "\(agent?.agent ?? "Agent") 请求输入 \(secret.name)",
-                    detail: "点按提供，内容只发送到该设备"
-                )
-            }
-            .buttonStyle(.plain)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-        }
-    }
-
-    private func noticeBar(mark: AgentAvatar.Mark, title: String, detail: String?) -> some View {
-        HStack(spacing: 10) {
-            AgentAvatar(mark: mark, size: 26, clawd: .raise)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(Theme.Fonts.label.weight(.semibold))
-                    .foregroundStyle(Theme.warning)
-                    .lineLimit(1)
-                if let detail {
-                    Text(detail)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(Theme.foreground.opacity(0.8))
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Self.sideInset)
-        .padding(.vertical, 10)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
-        .background(Theme.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.warning.opacity(0.3), lineWidth: 1))
-        .padding(.bottom, 2)
+        SecretRequestNotice(client: client, task: task, onOpen: onOpenSecret)
     }
 
     // MARK: Key row
@@ -610,6 +574,64 @@ struct TerminalInputArea: View {
             .accessibilityHint("轻点打字，按住说话")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onCompose() }
+    }
+}
+
+// MARK: - Secret request bar
+
+/// The active terminal's pending secret request as a bar (tap to provide it). Shared by the dock
+/// and the full keyboard, which both float it just above their top edge, outside their measured
+/// height, so it never resizes the terminal (D13). Empty while nothing is pending.
+struct SecretRequestNotice: View {
+    let client: CofluxClient
+    let task: Coflux_V1_Task?
+    let onOpen: () -> Void
+
+    private var agent: Coflux_V1_SessionAgentRef? {
+        task.flatMap { client.agent(forTask: $0) }
+    }
+
+    private var pendingSecret: SecretRequestInfo? {
+        task.flatMap { client.pendingSecretRequests(taskID: $0.id).first }
+    }
+
+    var body: some View {
+        if let secret = pendingSecret {
+            Button(action: onOpen) {
+                noticeBar(
+                    mark: .secret,
+                    title: "\(agent?.agent ?? "Agent") 请求输入 \(secret.name)",
+                    detail: "点按提供，内容只发送到该设备"
+                )
+            }
+            .buttonStyle(.plain)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+    }
+
+    private func noticeBar(mark: AgentAvatar.Mark, title: String, detail: String?) -> some View {
+        HStack(spacing: 10) {
+            AgentAvatar(mark: mark, size: 26, clawd: .raise)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Theme.Fonts.label.weight(.semibold))
+                    .foregroundStyle(Theme.warning)
+                    .lineLimit(1)
+                if let detail {
+                    Text(detail)
+                        .font(Theme.Fonts.label)
+                        .foregroundStyle(Theme.foreground.opacity(0.8))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, TerminalInputArea.sideInset)
+        .padding(.vertical, 10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18))
+        .background(Theme.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.warning.opacity(0.3), lineWidth: 1))
+        .padding(.bottom, 2)
     }
 }
 
