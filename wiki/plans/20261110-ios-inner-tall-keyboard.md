@@ -230,3 +230,11 @@ Out of scope:
 ### Merge and deploy
 
 iOS-only; reaches the user through a direct device install or TestFlight. No server, runtime or migration change.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-11
+- Mode: subagent(opus)
+- Commits: `07f3aabd..c395682e`
+- Deviations: the encoder and key model sit in their own file `FullKeyEncoding.swift` (Your call); laptop-pose key height lets all six rows (Claude row included) share the region below the fold, `max(48, (height − 16 − 5×6) / 6)`; `terminalColumn`'s keypad offset is also gated on `layout != .tall` so a leftover reveal cannot move the terminal there; the secret-request bar moved into a shared `SecretRequestNotice` view used by both inputs (dock unchanged); `KeyCap` / `TerminalKey` gained an optional `functionSurface` for the Claude row's darker fill; `Theme.microphone` and fixed-size `Theme.Fonts.FullKeyboard` caps added; where D4 is silent the encoder follows the mockup (⌥ + ctrl⌫ → `ESC BS`, ⇧⌥⏎ under kitty → `CSI 13;4u`).
+- Follow-ups: device acceptance on the Duo inner display was not run (the phone was unavailable over USB); check there that ⇧⏎ inserts a newline in Claude Code (D4), that the bottom row is not delayed by the home-indicator gesture, that left-edge keys do not lose touches to the sidebar edge swipe, and that a system-cancelled touch while talking leaves no stuck dictation overlay (same `abortDictation` path as the dock's microphone key).
