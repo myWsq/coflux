@@ -1,0 +1,147 @@
+name: ios-release
+
+# The iOS release line: an ios-<N> tag (N = commit count of a main commit) archives the app on
+# GitHub's xcode-27 image, uploads build N to App Store Connect and distributes it on TestFlight.
+# Signing uses an App Store Connect API key (Admin role) with -allowProvisioningUpdates; no
+# certificate is stored. Secrets live only in the ios-release environment, never release-signing.
+#
+# Rerun a failed distribution without re-uploading:
+#   gh workflow run ios-release.yml --ref ios-<N> -f tag=ios-<N> -f distribute_only=true
+# --ref must be the tag itself: the ios-release environment admits only ios-* refs.
+on:
+  push:
+    tags: ["ios-*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "ios-<N> tag to release (run the workflow from that same tag)"
+        required: true
+        type: string
+      distribute_only:
+        description: "Only distribute the already uploaded build; never archive or upload"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    name: TestFlight ${{ inputs.tag || github.ref_name }}
+    runs-on: xcode-27
+    environment: ios-release
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      DISTRIBUTE_ONLY: ${{ inputs.distribute_only && 'true' || 'false' }}
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0 # the build number is the commit count, and What to Test reads history
+
+      - name: Validate the tag (ios-<N>, on main, N = commit count)
+        env:
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^ios-[1-9][0-9]*$'; then
+            echo "::error::iOS release tag must be ios-<N> with N a positive integer, got ${RELEASE_TAG}"
+            exit 1
+          fi
+          if [ "$EVENT_REF" != "refs/tags/${RELEASE_TAG}" ]; then
+            echo "::error::run this workflow from the tag itself (event ref ${EVENT_REF}, tag ${RELEASE_TAG})"
+            exit 1
+          fi
+          tag_sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          head_sha=$(git rev-parse --verify HEAD)
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "::error::checkout ${head_sha} is not the tagged commit ${tag_sha}"
+            exit 1
+          fi
+          main_ref="refs/release-validation/main-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force --no-tags origin "+refs/heads/main:${main_ref}"
+          if ! git merge-base --is-ancestor "$tag_sha" "$main_ref"; then
+            echo "::error::${RELEASE_TAG} points at ${tag_sha}, which is not on origin/main"
+            exit 1
+          fi
+          count=$(git rev-list --count "$tag_sha")
+          if [ "${RELEASE_TAG#ios-}" != "$count" ]; then
+            echo "::error::${RELEASE_TAG} must be ios-${count}: N is the commit count of the tagged commit"
+            exit 1
+          fi
+          echo "::notice::${RELEASE_TAG} -> ${tag_sha} (build ${count})"
+
+      - name: Select Xcode 27.1
+        run: |
+          set -euo pipefail
+          test -d /Applications/Xcode_27.1.app
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+
+      # Node also runs testflight-distribute.mjs, so it is set up for distribute-only runs too.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - if: ${{ env.DISTRIBUTE_ONLY != 'true' }}
+        run: corepack enable
+      - if: ${{ env.DISTRIBUTE_ONLY != 'true' }}
+        run: pnpm install --frozen-lockfile
+      - if: ${{ env.DISTRIBUTE_ONLY != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: transport/tailcat/go.sum
+
+      # Never echo the key; no set -x anywhere near it.
+      - name: Install the App Store Connect API key
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ASC_API_KEY_P8 ASC_KEY_ID ASC_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::ios-release environment is missing ${name}"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ]
+          dir="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$dir"
+          chmod 700 "$dir"
+          key="$dir/AuthKey_${ASC_KEY_ID}.p8"
+          (umask 077 && printf '%s\n' "$ASC_API_KEY_P8" > "$key")
+          chmod 600 "$key"
+
+      - name: Archive, upload and distribute
+        if: ${{ env.DISTRIBUTE_ONLY != 'true' }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: apps/ios/release.sh
+
+      - name: Distribute only
+        if: ${{ env.DISTRIBUTE_ONLY == 'true' }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: apps/ios/release.sh --distribute-only
+
+      - name: Remove the API key
+        if: ${{ always() }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          if [ -n "${ASC_KEY_ID:-}" ]; then
+            rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          fi
