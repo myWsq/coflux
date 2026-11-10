@@ -203,3 +203,19 @@ Out of scope:
 - Needs the owner: an App Store Connect API key with the Admin role (App Store Connect › Users and Access › Integrations), its `.p8` placed in `~/.appstoreconnect/private_keys/`.
 - First acceptance run publishes the 2.25.0 iOS build from the cloud.
 - Open cleanup for the owner (not done here): delete legacy `desktop-v*` rulesets and tag policy; delete repository-level duplicates of the signing secrets.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-10
+- Mode: subagent(opus), one work package, no revision round
+- Commits: `11fd48ba..c84bb852` (`4c71f655` release.sh API-key signing and `--distribute-only`, `8baf94c9` ios-release.yml, `61bec549` release skill + AGENTS.md, `c84bb852` RELEASING.md rewrite with material moved to hot-upgrade-design.md §7–9 and deployment.md)
+- Verification: `bash -n apps/ios/release.sh` OK; actionlint clean except the unknown `xcode-27` label (a preview image newer than actionlint's list); the skill symlink resolves; every relative link and anchor in the touched documents resolves; `docs/RELEASING.md` 281 → 250 lines (5,964 → 4,976 words) with the release lines first. The cloud run itself is unexercised until the owner's Admin key exists.
+- Deviations:
+  - Node is set up on distribute-only runs too (the distribution script runs on Node).
+  - A manual run must start from the tag (`--ref ios-<N>`); the workflow rejects a ref that differs from `tag`, since `ios-release` admits only `ios-*` refs.
+  - The skill states the `pg_restore -l` check and the git-bundle fallback itself (deployment.md lacks them), and keeps the "breaking protocol: desktop before centre" exception.
+  - Statements found false were dropped or corrected (iOS outside `v*`; `CSC_LINK`; "discovery stays on GitHub"; the Tailcat/M4 remark).
+- Follow-ups:
+  - Owner: create the Admin App Store Connect API key; then create `ios-release` (tag policy `ios-*`), its three secrets and `ios-*` rulesets, and run the first `ios-<N>` release.
+  - Owner's call: delete legacy `desktop-v*` rulesets/tag policy and the repository-level copies of the signing secrets.
+  - With both the App Manager and the Admin key in `~/.appstoreconnect/private_keys/`, a local `release.sh` needs `ASC_KEY_ID` set to pick one.
