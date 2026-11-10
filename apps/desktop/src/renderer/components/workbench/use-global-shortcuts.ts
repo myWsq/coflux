@@ -28,8 +28,8 @@ type GlobalShortcutsOptions = {
    */
   onTogglePalette: () => void;
   /**
-   * ⌘⇧A and 「视图 → 下一个待处理」 (plan 20261109-sidebar-current-section): select the next
-   * workspace in the sidebar's 「当前」 list that waits for the user. Suspended like the terminal keys.
+   * ⌘⇧A and 「视图 → 下一个待处理」 (plan 20261110-sidebar-current-terminals): land on the next
+   * terminal in the sidebar's 「当前」 list that waits for the user. Suspended like the terminal keys.
    */
   onNextAttention: () => void;
   /** 挂起时键盘与原生菜单命令都不再作用于终端：设置页这类整页覆盖层盖住工作台时传 true，

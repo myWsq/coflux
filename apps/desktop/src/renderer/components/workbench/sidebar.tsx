@@ -1,13 +1,16 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap } from "lucide-react";
+import { Bot, ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Workspace } from "@coflux/protocol";
 
+import { AgentLogo } from "@/components/settings/agent-logos";
+import { isAgentId } from "@/components/settings/agent-settings";
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
-import { currentWorkspaces } from "@/components/workbench/current-workspaces";
+import { candidateSessionTitles, currentTerminals, type CurrentTerminalRow } from "@/components/workbench/current-terminals";
 import { DESKTOP_DRAG_BAND_STYLE } from "@/components/workbench/drag-region";
 import { DeviceOsMark, deviceOsName } from "@/components/workbench/device-os";
 import { copyEntityHandle } from "@/components/workbench/entity-handle";
@@ -30,9 +33,6 @@ import { cn } from "@/lib/utils";
  * 跨洲 relay 常在 200ms 以上——阈值取在这两簇之间，而不是取某个整数好看。 */
 const RTT_GOOD_MS = 200;
 
-/** How often the 「当前」 section re-reads the clock, so a visit leaving the 24-hour window drops out unprompted. */
-const CURRENT_CLOCK_TICK_MS = 60_000;
-
 const IDLE: WorkspaceActivity = { status: "idle" };
 
 /** The expanded projects (plan 20261109-sidebar-current-section), injected into the pure store module. */
@@ -54,14 +54,10 @@ function ActivityIcon({ activity, labeled }: { activity: WorkspaceActivity; labe
 }
 
 /**
- * One workspace row (plan 20261109-sidebar-current-section): the tree's row, and the 「当前」
- * section's, which reuses its icon slot, tooltip and context menu. `variant` decides the trailing
- * content: the tree shows the custom name and the diff, with the hover × delete button for
- * non-main workspaces; the section shows the project name and offers no × — deletion stays in
- * the tree row and the context menu.
+ * One workspace row in the project tree: the custom name and the diff trail the branch, with the
+ * hover × delete button for non-main workspaces.
  */
 function WorkspaceRow({
-  variant,
   workspace,
   project,
   daemon,
@@ -73,7 +69,6 @@ function WorkspaceRow({
   onRename,
   onRemove,
 }: {
-  variant: "tree" | "current";
   workspace: Workspace;
   project: Project;
   daemon: DaemonInfo | undefined;
@@ -188,40 +183,35 @@ function WorkspaceRow({
               <GitBranch className={cn("size-3 shrink-0", workspace.isMain ? "text-warning" : "opacity-70")} />
             )}
             <span className="min-w-0 flex-1 truncate text-base">{workspace.branch}</span>
-            {variant === "current" ? (
-              // The section names the project the row belongs to; the custom name and the diff stay in the tree.
-              <span className="max-w-24 shrink-0 truncate text-sm text-muted-foreground">{project.name}</span>
-            ) : (
-              // 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
-              // diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位
-              (() => {
-                if (!label && !hasDiff) return null;
-                return (
-                  <span
-                    className={cn(
-                      "flex shrink-0 items-center gap-2",
-                      !workspace.isMain &&
-                        "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
-                    )}
-                  >
-                    {label ? (
-                      <span className="max-w-24 truncate text-sm text-muted-foreground">
-                        {label}
-                      </span>
-                    ) : null}
-                    {hasDiff ? (
-                      <span className="whitespace-nowrap font-mono text-xs tabular-nums">
-                        <span className="text-success">+{workspace.additions}</span>{" "}
-                        <span className="text-destructive">−{workspace.deletions}</span>
-                      </span>
-                    ) : null}
-                  </span>
-                );
-              })()
-            )}
+            {/* 右端内容：自定义名称（name ≠ branch 时才有；主工作区未起名时默认叫「主工作区」）+ git diff 累计统计（plan 024，X=Y=0 时不渲染）。
+                diff 固定在最末；两者作为整体 hover 渐变淡出给删除按钮让位 */}
+            {(() => {
+              if (!label && !hasDiff) return null;
+              return (
+                <span
+                  className={cn(
+                    "flex shrink-0 items-center gap-2",
+                    !workspace.isMain &&
+                      "group-hover/workspace:[mask-image:linear-gradient(to_left,transparent_18px,black_44px)]",
+                  )}
+                >
+                  {label ? (
+                    <span className="max-w-24 truncate text-sm text-muted-foreground">
+                      {label}
+                    </span>
+                  ) : null}
+                  {hasDiff ? (
+                    <span className="whitespace-nowrap font-mono text-xs tabular-nums">
+                      <span className="text-success">+{workspace.additions}</span>{" "}
+                      <span className="text-destructive">−{workspace.deletions}</span>
+                    </span>
+                  ) : null}
+                </span>
+              );
+            })()}
           </button>
           {/* 主工作区不可删除：不渲染删除入口（服务端同样会拒绝，此处是入口层收敛） */}
-          {variant === "tree" && !workspace.isMain ? (
+          {!workspace.isMain ? (
             <button
               className="absolute right-1 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover/workspace:opacity-100 focus-visible:opacity-100"
               onClick={onRemove}
@@ -233,6 +223,88 @@ function WorkspaceRow({
         </div>
       </Tooltip>
     </ContextMenu>
+  );
+}
+
+/**
+ * One live agent terminal in the 「当前」 section (plan 20261110-sidebar-current-terminals): the
+ * agent's logo, the terminal's title, where it lives (project · branch, or the device for a
+ * directory workspace) and its activity. Clicking lands on the terminal; there is no context menu
+ * and no × — the terminal is managed from its tab.
+ */
+function TerminalRow({
+  row,
+  progress,
+  selected,
+  onSelect,
+}: {
+  row: CurrentTerminalRow;
+  progress: string | undefined;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const { workspace, project, daemon, agent, title, activity } = row;
+  const location = project ? `${project.name} · ${workspace.branch}` : daemon.name;
+  const tooltip = (
+    <div className="flex flex-col gap-1">
+      <div className="break-words font-medium">{title}</div>
+      <div className="flex flex-col gap-0.5">
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <ActivityIcon activity={activity} />
+          <span className="truncate">{activityLabel(activity)}</span>
+        </span>
+        {/* The agent's own words about what it needs; not truncated, as in the workspace tooltip. */}
+        {(activity.status === "approval" || activity.status === "question" || activity.status === "error") &&
+        activity.message ? (
+          <span className="flex items-start gap-1.5 text-sm text-foreground">
+            <MessageSquare className="mt-0.5 size-3 shrink-0 opacity-70" />
+            <span className="whitespace-pre-wrap break-words">{activity.message}</span>
+          </span>
+        ) : null}
+        {progress ? (
+          <span className="flex items-start gap-1.5 text-sm text-muted-foreground">
+            <LoaderCircle className="mt-0.5 size-3 shrink-0 opacity-70" />
+            <span className="whitespace-pre-wrap break-words">{progress}</span>
+          </span>
+        ) : null}
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          {project ? (
+            <GitBranch className="size-3 shrink-0 opacity-70" />
+          ) : (
+            <DeviceOsMark platform={daemon.platform} className="size-3 shrink-0 opacity-70" />
+          )}
+          <span className="truncate">{location}</span>
+        </span>
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Folder className="size-3 shrink-0 opacity-70" />
+          <span className="truncate">{workspace.path}</span>
+        </span>
+      </div>
+    </div>
+  );
+  return (
+    <Tooltip content={tooltip} placement="end" hasHoverIndication={false}>
+      <button
+        type="button"
+        aria-pressed={selected}
+        className={cn(
+          "flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left transition-colors",
+          selected
+            ? "bg-accent text-foreground"
+            : "text-secondary-foreground hover:bg-accent/70 hover:text-foreground",
+        )}
+        onClick={onSelect}
+      >
+        {isAgentId(agent) ? (
+          <AgentLogo agent={agent} className="size-3 opacity-70" />
+        ) : (
+          <Bot className="size-3 shrink-0 opacity-70" />
+        )}
+        <span className="min-w-0 flex-1 truncate text-base">{title}</span>
+        <span className="max-w-28 shrink-0 truncate text-sm text-muted-foreground">{location}</span>
+        <ActivityIcon activity={activity} labeled />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -302,6 +374,10 @@ type SidebarProps = {
   client: CofluxClient;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
+  /** The terminal on screen (the focused group's active task tab), for the 「当前」 section's highlight. */
+  onScreenTaskId: string | null;
+  /** A 「当前」 row's click: land on that terminal wherever it lives (the workbench's landOnTask). */
+  onLandOnTask: (taskId: string) => void;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
   selectedDeviceId: string | null;
   onSelectDevice: (daemonId: string) => void;
@@ -367,12 +443,12 @@ export function Sidebar(props: SidebarProps) {
   // Projects are collapsed by default and only the expanded set is remembered (plan
   // 20261109-sidebar-current-section), so a newly imported project appears collapsed.
   const [expandedIds, setExpandedIds] = useState(() => readExpandedProjects(EXPANDED_PROJECTS_STORE));
-  // The 「当前」 section's clock: a recent visit expires without user input within a tick.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), CURRENT_CLOCK_TICK_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+  // The 「当前」 rows' OSC titles: only the sessions that may be members, compared shallowly, so a
+  // checkpoint on any other session does not re-render the sidebar.
+  const sessionTitles = useStore(
+    client.store,
+    useShallow((state) => candidateSessionTitles(state.tasks, state.sessionAgents, state.sessionMetadata)),
+  );
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
@@ -387,20 +463,11 @@ export function Sidebar(props: SidebarProps) {
   const executorBusyOf = (workspaceId: string, daemon: DaemonInfo | undefined) =>
     (daemon?.online ?? false) && tasks.some((task) => task.workspaceId === workspaceId && executorTaskIds.has(task.id));
 
-  // 「当前」 (plan 20261109-sidebar-current-section): nothing before the first snapshot — data not
+  // 「当前」 (plan 20261110-sidebar-current-terminals): nothing before the first snapshot — data not
   // arrived yet is not "nothing current".
   const currentRows =
     snapshotRevision > 0
-      ? currentWorkspaces({
-          projects: allProjects,
-          workspaces,
-          daemons,
-          tasks,
-          sessionAgents,
-          visits: props.workspaceVisits,
-          selectedWorkspaceId: props.selectedWorkspaceId,
-          now,
-        })
+      ? currentTerminals({ projects: allProjects, workspaces, daemons, tasks, sessionAgents, titles: sessionTitles })
       : [];
 
   /** 在项目主工作区里列本地分支（exec 走该项目所在 daemon） */
@@ -441,33 +508,23 @@ export function Sidebar(props: SidebarProps) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {/* 「当前」 (plan 20261109-sidebar-current-section): in tree order, never re-sorted; the
-              same workspaces stay in the tree below as well. */}
+          {/* 「当前」 (plan 20261110-sidebar-current-terminals): the live agent terminals in tree
+              order, never re-sorted; their workspaces stay in the tree below as well. */}
           {currentRows.length > 0 ? (
             <div className="mb-3">
               <div className="mb-1.5 flex h-7 items-center px-2">
                 <span className="text-sm text-muted-foreground">当前</span>
               </div>
               <div className="space-y-0.5">
-                {currentRows.map(({ workspace, project, activity }) => {
-                  const daemon = daemons.find((item) => item.daemonId === project.daemonId);
-                  return (
-                    <WorkspaceRow
-                      key={workspace.id}
-                      variant="current"
-                      workspace={workspace}
-                      project={project}
-                      daemon={daemon}
-                      activity={activity}
-                      executorBusy={executorBusyOf(workspace.id, daemon)}
-                      progress={workspaceProgress(workspace.id, tasks, sessionAgents)}
-                      selected={workspace.id === props.selectedWorkspaceId}
-                      onSelect={() => props.onSelectWorkspace(workspace.id)}
-                      onRename={() => props.onRenameWorkspace(workspace)}
-                      onRemove={() => props.onRemoveWorkspace(workspace)}
-                    />
-                  );
-                })}
+                {currentRows.map((row) => (
+                  <TerminalRow
+                    key={row.task.id}
+                    row={row}
+                    progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
+                    selected={row.task.id === props.onScreenTaskId}
+                    onSelect={() => props.onLandOnTask(row.task.id)}
+                  />
+                ))}
               </div>
             </div>
           ) : null}
@@ -608,7 +665,6 @@ export function Sidebar(props: SidebarProps) {
                       {projectWorkspaces.map((workspace) => (
                         <WorkspaceRow
                           key={workspace.id}
-                          variant="tree"
                           workspace={workspace}
                           project={project}
                           daemon={daemon}

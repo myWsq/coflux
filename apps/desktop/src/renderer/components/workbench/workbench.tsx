@@ -22,7 +22,7 @@ import { DaemonOnboardingDialog } from "@/components/workbench/daemon-onboarding
 import { NavigationPalette } from "@/components/workbench/command-palette";
 import { deviceVisitKey, terminalVisitKey, workspaceVisitKey } from "@/components/workbench/command-palette-data";
 import { recordRecentPlace, type RecentPlacesStore } from "@/components/workbench/command-palette-recent";
-import { currentWorkspaces, nextAttentionRow } from "@/components/workbench/current-workspaces";
+import { candidateSessionTitles, currentTerminals, nextAttentionRow } from "@/components/workbench/current-terminals";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { useSettingsTooltipControl } from "@/components/workbench/account-footer";
 import { countLocalRunningTerminals } from "@/components/workbench/daemon-view";
@@ -220,6 +220,12 @@ function screenOf(
   const visible = new Set(activeTabIds(layout).filter(isTaskTabId));
   const focused = focusedTabId(layout);
   return { visible, focused: focused && visible.has(focused) ? focused : null };
+}
+
+/** The terminal on screen in a workspace's layout (the sidebar's 「当前」 highlight and ⌘⇧A's start): the focused group's active tab when it is a task tab. */
+function onScreenTaskOf(layout: TerminalLayout): string | null {
+  const focused = focusedTabId(layout);
+  return focused && isTaskTabId(focused) ? focused : null;
 }
 
 /**
@@ -1106,30 +1112,24 @@ export function Workbench({ client }: { client: CofluxClient }) {
   }
 
   /**
-   * ⌘⇧A 「下一个待处理」 (plan 20261109-sidebar-current-section): walks the sidebar's 「当前」 list,
-   * derived at the moment of the press from the store, the visit record and the selection — the
-   * same list the sidebar shows, never the notification snapshot. Lands on the waiting terminal
-   * when the activity names one, else selects the workspace; does nothing when no row waits.
+   * ⌘⇧A 「下一个待处理」 (plan 20261110-sidebar-current-terminals): walks the sidebar's 「当前」
+   * terminals, derived at the moment of the press from the store — the same list the sidebar
+   * shows, never the notification snapshot — starting after the terminal on screen as of now, and
+   * lands on the next waiting one. Does nothing when no terminal waits.
    */
   function goToNextAttention() {
     const state = client.store.getState();
-    const selectedId = selection?.kind === "workspace" ? selection.id : null;
-    const rows = currentWorkspaces({
+    const workspaceId = activeWorkspaceIdRef.current;
+    const rows = currentTerminals({
       projects: state.projects,
       workspaces: state.workspaces,
       daemons: state.daemons,
       tasks: state.tasks,
       sessionAgents: state.sessionAgents,
-      visits: workspaceVisits,
-      selectedWorkspaceId: selectedId,
-      now: Date.now(),
+      titles: candidateSessionTitles(state.tasks, state.sessionAgents, state.sessionMetadata),
     });
-    const target = nextAttentionRow(rows, selectedId);
-    if (!target) return;
-    const activity = target.activity;
-    const taskId = activity.status === "approval" || activity.status === "question" || activity.status === "error" ? activity.taskId : undefined;
-    if (taskId && landOnTask(taskId)) return;
-    selectWorkspace(target.workspace.id);
+    const target = nextAttentionRow(rows, workspaceId ? onScreenTaskOf(layoutOf(workspaceId)) : null);
+    if (target) landOnTask(target.task.id);
   }
 
   /**
@@ -1427,6 +1427,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const renderLayoutOf = (workspaceId: string): TerminalLayout => renderLayouts[workspaceId] ?? EMPTY_LAYOUT;
   const screen = screenOf(activeWorkspaceId, changesOpen, renderLayouts);
   const selectedLayout = activeWorkspaceId ? renderLayoutOf(activeWorkspaceId) : EMPTY_LAYOUT;
+  // The terminal on screen, for the sidebar's 「当前」 highlight (plan 20261110-sidebar-current-terminals).
+  const onScreenTaskId = activeWorkspaceId ? onScreenTaskOf(selectedLayout) : null;
   // Each visible pane sits on its group's body, in percentages the browser lays out in the same frame.
   const paneFrames = new Map<string, CSSProperties>();
   for (const { group, rect } of layoutGeometry(selectedLayout).groups) {
@@ -1811,6 +1813,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}
+        onScreenTaskId={onScreenTaskId}
+        onLandOnTask={landOnTask}
         selectedDeviceId={selection?.kind === "device" ? selection.id : null}
         onSelectDevice={selectDevice}
         onImportProject={() => setImportOpen(true)}
