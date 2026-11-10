@@ -132,19 +132,16 @@ enum KeyStyle {
     case normal
     /// ^C: destructive text
     case destructive
-    /// Option digits while an agent waits: amber fill
-    case hot
     /// ⏎: inverted primary
     case enter
 }
 
-/// A key cap: mockup 40 pt high (46 enlarged), radius 13, glass-like input fill.
+/// A key cap: mockup 40 pt high, radius 13, glass-like input fill.
 struct KeyCap: View {
     var label: String?
     var systemImage: String?
     var style: KeyStyle = .normal
     var height: CGFloat = Theme.Metrics.keyHeight
-    var large = false
 
     var body: some View {
         Group {
@@ -154,7 +151,7 @@ struct KeyCap: View {
                 Text(label ?? "")
             }
         }
-        .font(large ? Theme.Fonts.keyLarge : Theme.Fonts.key)
+        .font(Theme.Fonts.key)
         .foregroundStyle(foreground)
         .frame(maxWidth: .infinity)
         .frame(height: height)
@@ -170,7 +167,6 @@ struct KeyCap: View {
         switch style {
         case .normal: Theme.foreground
         case .destructive: Theme.destructive
-        case .hot: Theme.warning
         case .enter: Theme.primaryForeground
         }
     }
@@ -178,7 +174,6 @@ struct KeyCap: View {
     private var background: Color {
         switch style {
         case .normal, .destructive: Theme.input
-        case .hot: Theme.warning.opacity(0.16)
         case .enter: Theme.primary
         }
     }
@@ -186,7 +181,6 @@ struct KeyCap: View {
     private var stroke: Color {
         switch style {
         case .normal, .destructive: Theme.border
-        case .hot: Theme.warning.opacity(0.35)
         case .enter: .clear
         }
     }
@@ -208,14 +202,13 @@ struct TerminalKey: View {
     var systemImage: String?
     var style: KeyStyle = .normal
     var height: CGFloat = Theme.Metrics.keyHeight
-    var large = false
     let bytes: () -> String
 
     var body: some View {
         Button {
             sender.press(bytes())
         } label: {
-            KeyCap(label: label, systemImage: systemImage, style: style, height: height, large: large)
+            KeyCap(label: label, systemImage: systemImage, style: style, height: height)
         }
         .buttonStyle(KeyPressStyle())
     }
@@ -231,7 +224,6 @@ struct RepeatKey: View {
     var label: String?
     var systemImage: String?
     var height: CGFloat = Theme.Metrics.keyHeight
-    var large = false
     let bytes: () -> String
 
     /// How far the finger may wander before the touch counts as a swipe: the dock's drag
@@ -248,7 +240,7 @@ struct RepeatKey: View {
     @State private var timer: Timer?
 
     var body: some View {
-        KeyCap(label: label, systemImage: systemImage, height: height, large: large)
+        KeyCap(label: label, systemImage: systemImage, height: height)
             .opacity(phase == .pressed || phase == .repeating ? 0.6 : 1)
             .animation(.easeOut(duration: 0.08), value: phase)
             // Global coordinates: the dock moves under the finger once the extra keys follow it.
@@ -320,19 +312,18 @@ struct RepeatKey: View {
 
 // MARK: - The dock
 
-/// The terminal page's dock: an optional notice bar over a key row that follows the agent, pinned
-/// to the bottom of the content area. Typing lives on the 输入 toolbar item; talking on the
-/// row's microphone key (hold).
+/// The terminal page's dock: an optional secret-request bar over a fixed key row, pinned to the
+/// bottom of the content area. Typing lives on the 输入 toolbar item; talking on the row's
+/// microphone key (hold).
 ///
-/// - Key row: when the active terminal's agent is in `approval` or `question` it becomes the
-///   enlarged option keys `1 2 3 🎤 ↑ ↓ ⏎` (only the keys' bytes are sent — the menu text is never
-///   parsed); otherwise `esc ^C tab 🎤 ↑ ↓ /`, plus `← →` when the dock is wide enough.
+/// - Key row: the same keys whatever the agent is doing (user's call, 2026-11-10: a waiting
+///   agent gets no banner and no option keys — its menu is answered with the ordinary keys).
 /// - Extra keys: a swipe up anywhere over the dock brings the keys the quick rows leave out
 ///   (`TerminalExtraKeys`) up above the quick rows, following the finger; the host owns how much
 ///   shows (`keypadReveal`), snaps it open or shut on release, and pushes the terminal up by the
 ///   same amount. A swipe down puts them away.
-/// - The row has one fixed height, and the notice bar floats above the dock outside its measured
-///   size, so the notice never changes the terminal's size.
+/// - The row has one fixed height, and the secret-request bar floats above the dock outside its
+///   measured size, so it never changes the terminal's size.
 /// - Laptop pose: `inlineKeypad` shows the quick rows and the extra keys below the fold.
 ///
 /// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里与成文层走 client.sendInput。
@@ -382,11 +373,6 @@ struct TerminalInputArea: View {
         task.flatMap { client.agent(forTask: $0) }
     }
 
-    private var waitingState: String? {
-        guard let state = agent?.state, state == "approval" || state == "question" else { return nil }
-        return state
-    }
-
     private var pendingSecret: SecretRequestInfo? {
         task.flatMap { client.pendingSecretRequests(taskID: $0.id).first }
     }
@@ -407,7 +393,7 @@ struct TerminalInputArea: View {
                 dock
             }
         }
-        .animation(.smooth(duration: 0.2), value: waitingState)
+        .animation(.smooth(duration: 0.2), value: pendingSecret?.name)
     }
 
     private var dock: some View {
@@ -498,14 +484,6 @@ struct TerminalInputArea: View {
             }
             .buttonStyle(.plain)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
-        } else if let state = waitingState, let agent {
-            let name = agent.agent.isEmpty ? "agent" : agent.agent
-            noticeBar(
-                mark: .agent(agent.agent),
-                title: state == "approval" ? "\(name) 等待批准" : "\(name) 等待回答",
-                detail: agent.message.isEmpty ? nil : agent.message
-            )
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
 
@@ -542,9 +520,7 @@ struct TerminalInputArea: View {
     ///     esc  tab  [  🎤  ]  ↑  ⌫  ⏎
     ///     ^C   ^D   /    ←    ↓  →  ⏎
     ///
-    /// While the agent waits (`approval` / `question`) esc, tab and ^C turn into the amber option
-    /// keys 1 2 3 — only the keys' bytes are sent, the menu text is never parsed. Every key but the
-    /// microphone also drags the extra keys out; the microphone is left out, so sliding up from it
+    /// Every key but the microphone also drags the extra keys out; the microphone is left out, so sliding up from it
     /// while talking (onto 发送 / 取消) never moves them.
     private var keyRows: some View {
         let height = Theme.Metrics.keyHeight
@@ -561,18 +537,12 @@ struct TerminalInputArea: View {
 
     /// Seven columns of `column` each: ⏎ takes one, the microphone two.
     private func keyColumns(column: CGFloat, height: CGFloat, spacing: CGFloat) -> some View {
-        let waiting = waitingState != nil
-        return HStack(spacing: spacing) {
+        HStack(spacing: spacing) {
             VStack(spacing: spacing) {
                 HStack(spacing: spacing) {
                     terminalKeys {
-                        if waiting {
-                            TerminalKey(sender: sender, label: "1", style: .hot, height: height) { "1" }
-                            TerminalKey(sender: sender, label: "2", style: .hot, height: height) { "2" }
-                        } else {
-                            TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
-                            TerminalKey(sender: sender, label: "tab") { "\t" }
-                        }
+                        TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
+                        TerminalKey(sender: sender, label: "tab") { "\t" }
                     }
                     micKey(height: height)
                         .frame(width: column * 2 + spacing)
@@ -584,11 +554,7 @@ struct TerminalInputArea: View {
                 }
                 HStack(spacing: spacing) {
                     terminalKeys {
-                        if waiting {
-                            TerminalKey(sender: sender, label: "3", style: .hot, height: height) { "3" }
-                        } else {
-                            TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
-                        }
+                        TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
                         TerminalKey(sender: sender, label: "^D") { "\u{04}" }
                         TerminalKey(sender: sender, label: "/") { "/" }
                         RepeatKey(sender: sender, label: "←") { sender.arrowBytes("D") }

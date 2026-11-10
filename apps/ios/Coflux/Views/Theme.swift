@@ -64,8 +64,6 @@ enum Theme {
         static let cardBody = Font.subheadline
         /// Terminal key caps, mockup 14 pt mono
         static let key = Font.system(.subheadline, design: .monospaced).weight(.semibold)
-        /// Enlarged option keys (agent waiting), mockup 17 pt mono
-        static let keyLarge = Font.system(.body, design: .monospaced).weight(.semibold)
         /// Dictation transcript, mockup 18 pt
         static let transcript = Font.title3
     }
@@ -74,10 +72,9 @@ enum Theme {
     enum Metrics {
         /// Cards: home cards, project groups, device cards
         static let cardRadius: CGFloat = 24
-        /// Key caps: 40 pt high, 46 pt for the enlarged option keys and the keypad
+        /// Key caps: 40 pt high
         static let keyRadius: CGFloat = 13
         static let keyHeight: CGFloat = 40
-        static let keyHeightLarge: CGFloat = 46
         /// The one-line composer card; it expands to a multi-line card while typing
         static let composerHeight: CGFloat = 56
         static let composerRadius: CGFloat = 28
