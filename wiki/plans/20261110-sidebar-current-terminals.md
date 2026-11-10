@@ -321,3 +321,21 @@ Out of scope:
 Desktop-only; ships with the next `v*` release. No server deployment or migration. Release notes:
 「当前」 now lists agent terminals (each agent conversation is its own row; ⌘⇧A visits each waiting
 terminal); the 24-hour recent workspaces are gone. Walkthrough is the user's.
+
+## Outcome
+
+DONE on `dev/20261110-sidebar-current-terminals` (implementation `0dc5b088`, `b2223a3b`; baseline
+`176bfdfe`). Executed by subagent(opus) in one package, no revision rounds.
+
+- `current-terminals.ts` (+ test) replaces `current-workspaces.ts`; `workspace-visits.ts` (+ test)
+  and `WORKSPACE_VISITS_KEY` are gone. One derivation feeds the sidebar and ⌘⇧A; it never calls
+  `workspaceActivity`. An extra helper, `candidateSessionTitles`, backs the sidebar's shallow title
+  selector and the shortcut.
+- The sidebar's 「当前」 renders `TerminalRow`s; `WorkspaceRow` lost its `variant` and is the tree row
+  only. The highlight follows the focused group's active task tab of the shown workspace (also while
+  the changes overlay is open, as D5 reads).
+- Gates: `pnpm -C apps/desktop typecheck`, `lint`, `test` (600/600; 602 at baseline — the two
+  removed modules' tests out, the new suite in), `build` all green. The first commit alone does not
+  typecheck (the second completes it); the branch tip does.
+- Not verified here: the UI walkthrough (`pnpm dev:desktop:prod`) is the user's.
+- The stale `coflux_workspace_visits:<server>` localStorage value is left unread on users' machines.
