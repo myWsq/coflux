@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, History, LoaderCircle, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -18,8 +18,8 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { ClaudeTabCard } from "@/components/workbench/terminal-recap-card";
 import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
-import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
-import { AgentLogo, CodexLogo } from "@/components/settings/agent-logos";
+import { AgentGlyph } from "@/components/workbench/agent-glyph";
+import { AgentLogo } from "@/components/settings/agent-logos";
 import { effectiveAgents, type AgentId, type EffectiveAgent } from "@/components/settings/agent-settings";
 import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
@@ -55,48 +55,6 @@ import {
   type TerminalLayout,
 } from "@/components/workbench/terminal-layout";
 import { shouldActivateChangesView } from "@/components/workbench/workbench-state";
-
-/** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
- * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成 gym 第 0 帧站姿。
- * Codex shows its logo (plan 20261001-desktop-agents) and any other agent the lucide robot, both
- * with the state tints (approval/question→warning, error→destructive, done→success, as in the
- * sidebar). Clawd has no pose for a program stopped on an error, so claude shows the sidebar's
- * red error cross instead: no Clawd pose reads apart from both done and waiting. */
-function AgentGlyph({
-  agent,
-  state,
-  seen,
-  className,
-}: {
-  agent: string;
-  state: string;
-  /** 完成态已被用户看过（点开过该 tab）→ 不再撒花。 */
-  seen?: boolean;
-  className?: string;
-}) {
-  if (agent === "claude") {
-    if (state === "error") return <ActivityDots status="error" />;
-    const pose =
-      state === "active"
-        ? "active"
-        : state === "approval" || state === "question"
-          ? "raise"
-          : (state === "done" || state === "waiting") && !seen
-            ? "rest"
-            : "idle";
-    return <ClawdGlyph pose={pose} className={className} />;
-  }
-  const tone =
-    state === "approval" || state === "question"
-      ? "text-warning"
-      : state === "error"
-        ? "text-destructive"
-        : state === "done"
-          ? "text-success"
-          : "";
-  if (agent === "codex") return <CodexLogo className={cn("size-3 shrink-0", tone, className)} />;
-  return <Bot className={cn("size-3 shrink-0", tone, className)} />;
-}
 
 /** Drag payload type of a terminal tab. Deliberately not a file type: a tab dropped on a pane must never upload anything. */
 const TAB_DRAG_TYPE = "application/x-coflux-terminal-tab";

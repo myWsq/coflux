@@ -3,11 +3,10 @@ import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { ContextMenu } from "@astryxdesign/core/ContextMenu";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
-import { Bot, ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap } from "lucide-react";
+import { ChevronRight, Cloud, FileDiff, Folder, FolderOpen, FolderPlus, GitBranch, LoaderCircle, MessageSquare, Monitor, Plus, Radio, Trash2, X, Zap } from "lucide-react";
 import { SCREEN_CAPABILITY, type DaemonInfo, type Project, type Workspace } from "@coflux/protocol";
 
-import { AgentLogo } from "@/components/settings/agent-logos";
-import { isAgentId } from "@/components/settings/agent-settings";
+import { AgentGlyph } from "@/components/workbench/agent-glyph";
 import { AccountFooter, type SettingsTooltipControl } from "@/components/workbench/account-footer";
 import { BranchMenu, type BranchTaken } from "@/components/workbench/branch-menu";
 import { candidateSessionTitles, currentTerminals, type CurrentTerminalRow } from "@/components/workbench/current-terminals";
@@ -228,19 +227,22 @@ function WorkspaceRow({
 
 /**
  * One live agent terminal in the 「当前」 section (plan 20261110-sidebar-current-terminals): the
- * agent's logo, the terminal's title, where it lives (project · branch, or the device for a
- * directory workspace) and its activity. Clicking lands on the terminal; there is no context menu
+ * agent's status glyph (the same as its tab's), the terminal's title and where it lives (project ·
+ * branch, or the device for a directory workspace). Clicking lands on the terminal; there is no context menu
  * and no × — the terminal is managed from its tab.
  */
 function TerminalRow({
   row,
   progress,
   selected,
+  seen,
   onSelect,
 }: {
   row: CurrentTerminalRow;
   progress: string | undefined;
   selected: boolean;
+  /** The finished turn has been on screen since it finished: Clawd stops throwing confetti. */
+  seen: boolean;
   onSelect: () => void;
 }) {
   const { workspace, project, daemon, agent, title, activity } = row;
@@ -295,14 +297,11 @@ function TerminalRow({
         )}
         onClick={onSelect}
       >
-        {isAgentId(agent) ? (
-          <AgentLogo agent={agent} className="size-3 opacity-70" />
-        ) : (
-          <Bot className="size-3 shrink-0 opacity-70" />
-        )}
+        {/* The tab's glyph carries the status (Clawd's poses, the tinted logos): no trailing dots. */}
+        <AgentGlyph agent={agent} state={activity.status} seen={seen} className={selected ? "opacity-90" : "opacity-70"} />
+        <span className="sr-only">{activityLabel(activity)}</span>
         <span className="min-w-0 flex-1 truncate text-base">{title}</span>
         <span className="max-w-28 shrink-0 truncate text-sm text-muted-foreground">{location}</span>
-        <ActivityIcon activity={activity} labeled />
       </button>
     </Tooltip>
   );
@@ -376,6 +375,8 @@ type SidebarProps = {
   onSelectWorkspace: (workspaceId: string) => void;
   /** The terminal on screen (the focused group's active task tab), for the 「当前」 section's highlight. */
   onScreenTaskId: string | null;
+  /** Every terminal on screen (each group's active task tab; none while the changes overlay is open): a finished turn shown there counts as seen. */
+  visibleTaskIds: ReadonlySet<string>;
   /** A 「当前」 row's click: land on that terminal wherever it lives (the workbench's landOnTask). */
   onLandOnTask: (taskId: string) => void;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
@@ -470,6 +471,25 @@ export function Sidebar(props: SidebarProps) {
       ? currentTerminals({ projects: allProjects, workspaces, daemons, tasks, sessionAgents, titles: sessionTitles })
       : [];
 
+  // Which finished turns have been seen, by the tab's rule (workspace-terminal.tsx): a session is
+  // marked once its terminal is on screen while done, and forgotten when its agent works again, so
+  // a row stops throwing confetti exactly when its tab does. Adjusted during render.
+  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
+  let seenNext = seenDone;
+  for (const row of currentRows) {
+    const sessionId = row.task.sessionId;
+    if (!sessionId) continue;
+    const done = row.activity.status === "done";
+    if (!done && seenNext.has(sessionId)) {
+      const next = new Set(seenNext);
+      next.delete(sessionId);
+      seenNext = next;
+    } else if (done && props.visibleTaskIds.has(row.task.id) && !seenNext.has(sessionId)) {
+      seenNext = new Set(seenNext).add(sessionId);
+    }
+  }
+  if (seenNext !== seenDone) setSeenDone(seenNext);
+
   /** 在项目主工作区里列本地分支（exec 走该项目所在 daemon） */
   async function listProjectBranches(project: Project) {
     const main = client.store.getState().workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
@@ -522,6 +542,7 @@ export function Sidebar(props: SidebarProps) {
                     row={row}
                     progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
                     selected={row.task.id === props.onScreenTaskId}
+                    seen={seenNext.has(row.task.sessionId ?? "")}
                     onSelect={() => props.onLandOnTask(row.task.id)}
                   />
                 ))}
