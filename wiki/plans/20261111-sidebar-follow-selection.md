@@ -254,3 +254,16 @@ Out of scope:
 Desktop renderer only: no protocol, server, or daemon change; ships with the
 next `v*` desktop release. The UI walkthrough is the user's (frontend changes
 are accepted by hand, not by the agent).
+
+## Outcome
+
+- Status: COMPLETE — 2026-11-11
+- Mode: self (as recorded)
+- Commits: `04464afc..e2712b4a`
+- Deviations: the expansion runs as React's adjust-state-during-render pattern
+  instead of inside the reveal effect — oxlint's `react/set-state-in-effect`
+  gate rejects the effect form; the trigger key and D2/D3 semantics are
+  unchanged. The reveal helper also retries on every render via a pending ref,
+  which covers the startup/late-snapshot scroll for devices as well.
+- Follow-ups: UI walkthrough on the real app is the user's (jump with the
+  project collapsed, repeat jump after a manual collapse, restart persistence).
