@@ -272,6 +272,10 @@ interface SessionAgentData {
   /** agent 自己的会话标识（plan 20260919）：客户端据此定位 transcript 文件。空 = 旧 worker 或
    * 未上报。中心只做保守形状校验后原样转发，不解释、不落库。 */
   agentSessionId: string;
+  /** Account-wide "seen" mark for a finished turn (plan 20261111-agent-seen-sync): set by a client's
+   * SessionSeen, held only in memory, carried over across daemon reports while the turn stays
+   * finished and the agent session id is unchanged. The daemon's own value is ignored. */
+  seen: boolean;
 }
 
 /** A pending secret request (plan 20260926-agent-secret-input): metadata only, never the value.
@@ -319,6 +323,8 @@ interface DaemonResyncAuthority {
  * OSC 7501 (the program stopped on an error). `waiting` is the v0.21 value, still accepted so a
  * mixed-version fleet does not lose entries. */
 const AGENT_STATES = new Set(["", "active", "approval", "question", "error", "done", "waiting"]);
+/** States of a finished turn: the only ones that can carry a seen mark. */
+const FINISHED_AGENT_STATES = new Set(["done", "waiting"]);
 
 export interface DaemonConn {
   info: DaemonInfoData;
@@ -2112,6 +2118,8 @@ export class Hub {
   private acceptSessionAgents(daemon: DaemonConn, sessions: readonly SessionAgentRef[]): void {
     const daemonId = daemon.info.daemonId;
     const live = this.catalog.get(daemonId);
+    const previous = this.sessionAgents.get(daemonId);
+    const previousBySession = new Map(previous?.sessions.map((p) => [p.sessionId, p]));
     const valid: SessionAgentData[] = [];
     for (const entry of sessions.slice(0, MAX_AGENT_ENTRIES)) {
       if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
@@ -2127,9 +2135,12 @@ export class Hub {
       const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
       // 形状不对就当没有（第二道防线；第一道是「id 永远作为独立 argv 传递」，见 plan 20260919）。
       const agentSessionId = validAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : "";
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId });
+      // The mark survives a re-report of the same finished turn only; a new turn (any other state)
+      // or a new agent session clears it. Whatever the daemon sent in `seen` is ignored.
+      const before = previousBySession.get(entry.sessionId);
+      const seen = before !== undefined && before.seen && FINISHED_AGENT_STATES.has(entry.state) && before.agentSessionId === agentSessionId;
+      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId, seen });
     }
-    const previous = this.sessionAgents.get(daemonId);
     const unchanged =
       previous !== undefined &&
       previous.sessions.length === valid.length &&
@@ -2142,13 +2153,32 @@ export class Hub {
           p.message === valid[i]!.message &&
           p.progress === valid[i]!.progress &&
           // 漏掉这条，Claude `/clear`（state 不变、只换 session）就永远不会重播。
-          p.agentSessionId === valid[i]!.agentSessionId,
+          p.agentSessionId === valid[i]!.agentSessionId &&
+          // A carry-over that clears the mark must broadcast too.
+          p.seen === valid[i]!.seen,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
     if (valid.length === 0) this.sessionAgents.delete(daemonId);
     else this.sessionAgents.set(daemonId, { accountId: daemon.accountId, sessions: valid });
     this.broadcast(daemon.accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions: valid } });
+  }
+
+  /** A client of the account had this terminal's finished turn on screen (SessionSeen): mark the
+   * stored entry seen and broadcast its daemon's list exactly like a daemon report would. Unknown
+   * sessions, other accounts' sessions, unfinished turns and already-seen ones change nothing. */
+  private markSessionSeen(accountId: AccountId, sessionId: string): void {
+    for (const [daemonId, entry] of this.sessionAgents) {
+      if (entry.accountId !== accountId) continue;
+      const index = entry.sessions.findIndex((s) => s.sessionId === sessionId);
+      if (index < 0) continue;
+      const session = entry.sessions[index]!;
+      if (session.seen || !FINISHED_AGENT_STATES.has(session.state)) return;
+      const sessions = entry.sessions.map((s, i) => (i === index ? { ...s, seen: true } : s));
+      this.sessionAgents.set(daemonId, { accountId, sessions });
+      this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions } });
+      return;
+    }
   }
 
   /** Pending secret requests (plan 20260926-agent-secret-input): each entry must name a session of
@@ -3365,6 +3395,11 @@ export class Hub {
         } catch (error) {
           this.sendClient(client, { case: "notificationPage", value: { requestId, error: (error as Error).message } });
         }
+        break;
+      }
+      case "sessionSeen": {
+        // Fire-and-forget: no reply, whatever the outcome.
+        this.markSessionSeen(client.accountId!, msg.payload.value.sessionId);
         break;
       }
       case "notificationRead": {
