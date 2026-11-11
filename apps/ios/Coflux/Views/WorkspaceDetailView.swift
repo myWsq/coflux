@@ -484,7 +484,7 @@ struct WorkspaceDetailView: View {
                     .foregroundStyle(Theme.destructive)
             } else {
                 ClawdGlyph(
-                    pose: ClawdPose(state: agent?.state ?? "", seen: navigation.seenFinishedTaskIDs.contains(task.id)),
+                    pose: ClawdPose(state: agent?.state ?? "", seen: navigation.isTurnSeen(taskID: task.id, centreSeen: agent?.seen ?? false)),
                     size: min(size, ClawdSheet.renderedGlyphSize)
                 )
             }
@@ -583,11 +583,15 @@ struct WorkspaceDetailView: View {
     }
 
     /// A finished terminal counts as seen once it is the active one (the shell forgets it when
-    /// its agent starts another turn).
+    /// its agent starts another turn), here at once and, through the centre, on every client of
+    /// the account.
     private func updateSeenFinished() {
         guard let active = activeTaskID, finishedTaskIDs.contains(active),
               !navigation.seenFinishedTaskIDs.contains(active) else { return }
         navigation.seenFinishedTaskIDs.insert(active)
+        if let task = members.first(where: { $0.id == active }), task.hasSessionID {
+            client.markSessionSeen(sessionID: task.sessionID)
+        }
     }
 
     /// The agent's name, or the terminal's title when another terminal here shows the same name.

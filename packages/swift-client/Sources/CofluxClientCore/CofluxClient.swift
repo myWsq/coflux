@@ -1132,6 +1132,18 @@ public final class CofluxClient {
         return true
     }
 
+    /// Reports a terminal's finished agent turn as looked at (plan 20261111-agent-seen-sync): the
+    /// centre marks it seen for every client of the account and re-broadcasts that device's
+    /// presence. Fire-and-forget, no reply. Nothing is sent while the centre is not connected, or
+    /// when the session's turn is not finished ("done"/"waiting") or is already marked.
+    public func markSessionSeen(sessionID: String) {
+        guard controlAuthenticated, let info = sessionAgents[sessionID], !info.session.seen,
+              info.session.state == "done" || info.session.state == "waiting" else { return }
+        var seen = Coflux_V1_SessionSeen()
+        seen.sessionID = sessionID
+        send(.sessionSeen(seen))
+    }
+
     public func listDeviceDirectory(daemonID: String, path: String) async throws -> Coflux_V1_FsListed {
         try await deviceRouter.listDirectory(daemonID: daemonID, workspaceID: "", path: path, browseHome: true)
     }
