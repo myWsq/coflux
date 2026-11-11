@@ -375,8 +375,6 @@ type SidebarProps = {
   onSelectWorkspace: (workspaceId: string) => void;
   /** The terminal on screen (the focused group's active task tab), for the 「当前」 section's highlight. */
   onScreenTaskId: string | null;
-  /** Every terminal on screen (each group's active task tab; none while the changes overlay is open): a finished turn shown there counts as seen. */
-  visibleTaskIds: ReadonlySet<string>;
   /** A 「当前」 row's click: land on that terminal wherever it lives (the workbench's landOnTask). */
   onLandOnTask: (taskId: string) => void;
   /** 当前选中的设备（设备详情视图，plan 048）；与 selectedWorkspaceId 互斥 */
@@ -434,6 +432,9 @@ export function Sidebar(props: SidebarProps) {
   const deviceTransports = useStore(client.store, (state) => state.deviceTransports);
   const screenRecords = useStore(props.screens.records, (state) => state.records);
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // A 「当前」 row stops throwing confetti by the tab's rule: once the finished turn is seen anywhere
+  // on the account, or here (plan 20261111-agent-seen-sync).
+  const seenSessions = useStore(client.store, (state) => state.seenSessions);
   // Executor runs (plan 20260929-executor-pip): a workspace whose terminal has one delegated a
   // sub-task; the row shows activity for it when the agents themselves are idle.
   const executorRuns = useStore(client.store, (state) => state.executorRuns);
@@ -470,25 +471,6 @@ export function Sidebar(props: SidebarProps) {
     snapshotRevision > 0
       ? currentTerminals({ projects: allProjects, workspaces, daemons, tasks, sessionAgents, titles: sessionTitles })
       : [];
-
-  // Which finished turns have been seen, by the tab's rule (workspace-terminal.tsx): a session is
-  // marked once its terminal is on screen while done, and forgotten when its agent works again, so
-  // a row stops throwing confetti exactly when its tab does. Adjusted during render.
-  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
-  let seenNext = seenDone;
-  for (const row of currentRows) {
-    const sessionId = row.task.sessionId;
-    if (!sessionId) continue;
-    const done = row.activity.status === "done";
-    if (!done && seenNext.has(sessionId)) {
-      const next = new Set(seenNext);
-      next.delete(sessionId);
-      seenNext = next;
-    } else if (done && props.visibleTaskIds.has(row.task.id) && !seenNext.has(sessionId)) {
-      seenNext = new Set(seenNext).add(sessionId);
-    }
-  }
-  if (seenNext !== seenDone) setSeenDone(seenNext);
 
   /** 在项目主工作区里列本地分支（exec 走该项目所在 daemon） */
   async function listProjectBranches(project: Project) {
@@ -542,7 +524,7 @@ export function Sidebar(props: SidebarProps) {
                     row={row}
                     progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
                     selected={row.task.id === props.onScreenTaskId}
-                    seen={seenNext.has(row.task.sessionId ?? "")}
+                    seen={client.isTurnSeen(sessionAgents[row.task.sessionId ?? ""], seenSessions, row.task.sessionId ?? "")}
                     onSelect={() => props.onLandOnTask(row.task.id)}
                   />
                 ))}

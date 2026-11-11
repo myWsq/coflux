@@ -1536,6 +1536,27 @@ export function Workbench({ client }: { client: CofluxClient }) {
     for (const taskId of screen.visible) if (!previous.has(taskId)) attach.ensureVisible(taskId);
   });
 
+  // A finished agent turn on screen counts as seen, for the whole account (plan
+  // 20261111-agent-seen-sync): reported when a terminal comes on screen and when presence or the task
+  // list changes while it is there. markSessionSeen sends at most once per finished turn.
+  const markVisibleTurnsSeen = useEffectEvent(() => {
+    const visibleTasks = client.store.getState().tasks;
+    for (const taskId of screen.visible) {
+      const sessionId = visibleTasks.find((task) => task.id === taskId)?.sessionId;
+      if (sessionId) client.markSessionSeen(sessionId);
+    }
+  });
+  useEffect(() => {
+    markVisibleTurnsSeen();
+  });
+  useEffect(
+    () =>
+      client.store.subscribe((state, previous) => {
+        if (state.sessionAgents !== previous.sessionAgents || state.tasks !== previous.tasks) markVisibleTurnsSeen();
+      }),
+    [client],
+  );
+
   // Persisting (see flushLayoutPersist), scheduled after every commit that changed the layouts.
   const flushLayoutPersistLater = useEffectEvent(() => flushLayoutPersist());
   useEffect(() => {
@@ -1814,7 +1835,6 @@ export function Workbench({ client }: { client: CofluxClient }) {
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}
         onScreenTaskId={onScreenTaskId}
-        visibleTaskIds={screen.visible}
         onLandOnTask={landOnTask}
         selectedDeviceId={selection?.kind === "device" ? selection.id : null}
         onSelectDevice={selectDevice}

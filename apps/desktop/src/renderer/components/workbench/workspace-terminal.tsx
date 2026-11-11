@@ -517,6 +517,9 @@ export function WorkspaceTerminal({
   const fileTabs = useStore(files.tabs, (state) => state.tabs);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // A finished turn stops throwing confetti once it is seen anywhere on the account, or here
+  // (plan 20261111-agent-seen-sync); the workbench reports what is on screen.
+  const seenSessions = useStore(client.store, (state) => state.seenSessions);
   // Executor runs (plan 20260929-executor-pip): a tab whose terminal delegated a sub-task shows an
   // activity indicator while it is not on screen. The map only changes with a center snapshot.
   const executorRuns = useStore(client.store, (state) => state.executorRuns);
@@ -543,8 +546,6 @@ export function WorkspaceTerminal({
 
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
-  // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
-  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -631,30 +632,6 @@ export function WorkspaceTerminal({
   const pending = layout.pending ?? null;
   const geometry = layoutGeometry(layout);
   const singleGroup = geometry.groups.length === 1;
-
-  // Which finished agents have been seen, as of this render: a session is forgotten once its agent
-  // works again, and marked seen when its tab is on screen (this workspace is shown, the changes
-  // overlay is closed, and it is its group's active tab). Adjusted during render; the tabs below
-  // render from `seenNow`.
-  let seenNext = seenDone;
-  for (const { group } of geometry.groups) {
-    for (const taskId of group.tabs) {
-      if (isBrowserTabId(taskId)) continue;
-      const sessionId = taskById.get(taskId)?.sessionId;
-      if (!sessionId) continue;
-      const agentState = sessionAgents[sessionId]?.state;
-      const done = agentState === "done" || agentState === "waiting";
-      if (agentState && !done && seenNext.has(sessionId)) {
-        const next = new Set(seenNext);
-        next.delete(sessionId);
-        seenNext = next;
-      } else if (done && active && !changesOpen && group.activeTabId === taskId && !seenNext.has(sessionId)) {
-        seenNext = new Set(seenNext).add(sessionId);
-      }
-    }
-  }
-  if (seenNext !== seenDone) setSeenDone(seenNext);
-  const seenNow = seenNext;
 
   function endDrag() {
     setDragTaskId(null);
@@ -920,7 +897,7 @@ export function WorkspaceTerminal({
     const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
-    const tabSeenDone = Boolean(sessionId && seenNow.has(sessionId));
+    const tabSeenDone = Boolean(sessionId && client.isTurnSeen(agentEntry, seenSessions, sessionId));
     // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
     const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
     // Moving a group's only tab into a new group beside that group would leave nothing behind.

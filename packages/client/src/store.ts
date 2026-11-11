@@ -42,7 +42,23 @@ export type SessionAgentState = {
    * 客户端据此定位 transcript 文件。空 = 旧 worker、旧离线缓存或未上报——**按"没有 id"处理，
    * 别信这里的 string 类型**（离线缓存里恢复出来的旧条目根本没有这个字段）。 */
   agentSessionId: string;
+  /** The centre's account-wide mark (plan 20261111-agent-seen-sync): some client of the account had
+   * this finished turn on screen. False from an older centre; optional so hand-built entries may
+   * leave it out (absent = not seen). Read it through `isTurnSeen`, which also honours this
+   * client's own optimistic mark. */
+  seen?: boolean;
 };
+
+/** A finished turn ("done", or an old worker's "waiting"): the only states a seen mark applies to. */
+function isFinishedTurn(entry: SessionAgentState | undefined): boolean {
+  return entry !== undefined && (entry.state === "done" || entry.state === "waiting");
+}
+
+/** Whether a finished turn counts as looked at (plan 20261111-agent-seen-sync): the centre's mark,
+ * or this client's optimistic one (`CofluxState.seenSessions`) until the centre's arrives. */
+export function isTurnSeen(entry: SessionAgentState | undefined, seenSessions: ReadonlySet<string>, sessionId: string): boolean {
+  return (entry?.seen ?? false) || seenSessions.has(sessionId);
+}
 
 /** A pending secret request (plan 20260926-agent-secret-input): an agent in the terminal
  * `sessionId` / `taskId` asked the user for `name`. Metadata only — the value never passes through
@@ -531,7 +547,7 @@ function restoreSessionAgents(value: Record<string, SessionAgentState> | undefin
   return Object.fromEntries(
     Object.entries(value).map(([sessionId, entry]) => [
       sessionId,
-      { ...entry, agentSessionId: typeof entry?.agentSessionId === "string" ? entry.agentSessionId : "" },
+      { ...entry, agentSessionId: typeof entry?.agentSessionId === "string" ? entry.agentSessionId : "", seen: entry?.seen === true },
     ]),
   );
 }
@@ -586,6 +602,9 @@ export type CofluxState = {
   sessionMetadata: Record<string, SessionMetadataState>;
   /** agent presence + hook 回合状态（plan 073）：sessionId → agent/state。来自 sessionAgentsUpdated 按设备全量替换。 */
   sessionAgents: Record<string, SessionAgentState>;
+  /** Sessions whose finished turn this client reported seen (`markSessionSeen`) — the optimistic mark
+   * until the centre's `seen` comes back. Dropped once the entry is gone or no longer finished. */
+  seenSessions: Set<string>;
   /** Pending secret requests (plan 20260926-agent-secret-input): requestId → request, replaced per
    * device by secretRequestsUpdated. Live-only: never written to the offline catalog. */
   secretRequests: Record<string, SecretRequestState>;
@@ -885,6 +904,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     localSessions: [],
     sessionMetadata: {},
     sessionAgents: {},
+    seenSessions: new Set<string>(),
     secretRequests: {},
     executorRuns: {},
     annotationSummaries: {},
@@ -1513,6 +1533,22 @@ export function createCofluxClient(options: CofluxClientOptions) {
     return true;
   }
 
+  /**
+   * Reports a finished agent turn as looked at (plan 20261111-agent-seen-sync): marks it seen here at
+   * once and tells the centre, which marks it for every client of the account. At most once per
+   * finished turn: nothing happens unless the session's entry is "done"/"waiting" and neither mark is
+   * set. Not connected: nothing is marked, so the caller's next try (presence is replayed on
+   * reconnect) still reaches the centre. Fire-and-forget: the centre does not answer.
+   */
+  function markSessionSeen(sessionId: string): void {
+    if (!controlAuthenticated) return;
+    const state = store.getState();
+    const entry = state.sessionAgents[sessionId];
+    if (!isFinishedTurn(entry) || isTurnSeen(entry, state.seenSessions, sessionId)) return;
+    store.setState({ seenSessions: new Set(state.seenSessions).add(sessionId) });
+    send({ case: "sessionSeen", value: { sessionId } });
+  }
+
   /** Ids of workspaces hidden by a pending removal: they may still come back (plan 078's create adoption must know them). */
   function hiddenWorkspaceIds(): string[] {
     return [...parkedWorkspaces.keys()];
@@ -1852,9 +1888,17 @@ export function createCofluxClient(options: CofluxClientOptions) {
               message: session.message,
               progress: session.progress,
               agentSessionId: session.agentSessionId ?? "",
+              seen: session.seen ?? false,
             };
           }
-          return { sessionAgents };
+          // This client's own marks on that device's sessions last only while the turn they marked
+          // is still on: gone or no longer finished drops them, in this same write.
+          let seenSessions = state.seenSessions;
+          for (const sessionId of state.seenSessions) {
+            const ofDaemon = state.sessionAgents[sessionId]?.daemonId === value.daemonId || sessionAgents[sessionId]?.daemonId === value.daemonId;
+            if (ofDaemon && !isFinishedTurn(sessionAgents[sessionId])) seenSessions = withoutSetValue(seenSessions, sessionId);
+          }
+          return { sessionAgents, seenSessions };
         });
         break;
       }
@@ -2228,6 +2272,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       localSessions: [],
       sessionMetadata: {},
       sessionAgents: {},
+      seenSessions: new Set<string>(),
       secretRequests: {},
       executorRuns: {},
       annotationSummaries: {},
@@ -2652,6 +2697,9 @@ export function createCofluxClient(options: CofluxClientOptions) {
     removeWorkspace,
     removeProject,
     setProjectArchived,
+    markSessionSeen,
+    // The pure rule, here too so the apps reach it through the client they already hold.
+    isTurnSeen,
     hiddenWorkspaceIds,
     retainDevice,
     /** executor（plan 116）：订阅 daemon 推来的四条；返回退订函数。至多一个订阅者。 */

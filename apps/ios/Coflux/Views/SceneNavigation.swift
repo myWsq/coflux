@@ -74,8 +74,15 @@ final class SceneNavigation {
     /// Terminals whose agent finished its turn and that the user has looked at since (the
     /// desktop's `seen`): Clawd stands still on them instead of throwing confetti, on the tabs
     /// and on home. The terminal page adds the active one; the shell forgets a terminal once
-    /// its agent is no longer finished.
+    /// its agent is no longer finished. The optimistic half of the account-wide mark: read it
+    /// through `isTurnSeen`, which adds the centre's `SessionAgentRef.seen`.
     var seenFinishedTaskIDs: Set<String> = []
+
+    /// Whether a terminal's finished turn counts as looked at (plan 20261111-agent-seen-sync):
+    /// some client of the account reported it (`centreSeen`), or this app did.
+    func isTurnSeen(taskID: String?, centreSeen: Bool) -> Bool {
+        centreSeen || (taskID.map { seenFinishedTaskIDs.contains($0) } ?? false)
+    }
 
     struct PendingTerminal: Equatable {
         let workspaceID: String

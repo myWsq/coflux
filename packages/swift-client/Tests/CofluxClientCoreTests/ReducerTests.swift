@@ -200,6 +200,30 @@ struct ReducerTests {
         #expect(client.workspaceProgress(workspaceID: "w1") == nil)
     }
 
+    @Test func centreSeenMarkIsVisibleOnPresence() {
+        let client = makeClient()
+        var initial = snapshot()
+        initial.tasks[0].sessionID = "s1"
+        client.apply(.stateSnapshot(initial))
+
+        var agent = Coflux_V1_SessionAgentRef()
+        agent.sessionID = "s1"
+        agent.taskID = "t1"
+        agent.agent = "claude"
+        agent.state = "done"
+        var agents = Coflux_V1_SessionAgentsUpdated()
+        agents.daemonID = "d1"
+        agents.sessions = [agent]
+        client.apply(.sessionAgentsUpdated(agents))
+        #expect(client.sessionAgents["s1"]?.session.seen == false)
+
+        // Another client of the account looked at the finished turn: the centre re-broadcasts it seen.
+        agent.seen = true
+        agents.sessions = [agent]
+        client.apply(.sessionAgentsUpdated(agents))
+        #expect(client.sessionAgents["s1"]?.session.seen == true)
+    }
+
     @Test func localSessionExitImmediatelyClearsAgentPresence() {
         let client = makeClient()
         var initial = snapshot()

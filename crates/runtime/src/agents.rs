@@ -61,6 +61,7 @@ pub fn detect_session_agents(alive: &HashMap<String, (String, i32)>) -> Vec<wire
                 message: String::new(), // notify 留言同上（plan 074）
                 progress: String::new(), // 进度短评同上（plan 088）
                 agent_session_id: String::new(), // agent 自己的会话标识同上（plan 20260919）
+                seen: false, // set only by the centre (plan 20261111-agent-seen-sync)
             })
         })
         .collect();

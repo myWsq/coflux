@@ -126,6 +126,9 @@ struct WorkspaceActivity {
     /// That agent's turn state (`SessionAgentRef.state`); a pending secret request counts as
     /// waiting for approval.
     let agentState: String?
+    /// The centre's account-wide seen mark on that agent's finished turn
+    /// (`SessionAgentRef.seen`, plan 20261111-agent-seen-sync).
+    let agentSeen: Bool
     let tone: Tone
     let subtitle: String
     /// The terminal the row opens: the one that waits, else the agent's, else nil (keep the last).
@@ -155,12 +158,14 @@ struct WorkspaceActivity {
         if let secret = client.pendingSecretRequest(workspaceID: workspace.id) {
             agent = best?.ref.agent
             agentState = "approval"
+            agentSeen = false
             tone = .waiting
             subtitle = "等待输入 \(secret.name)"
             taskID = secret.taskID
         } else if let best, best.rank >= 1 {
             agent = best.ref.agent
             agentState = best.ref.state
+            agentSeen = best.ref.seen
             taskID = best.task.id
             let message = best.ref.message.isEmpty ? nil : best.ref.message
             switch best.rank {
@@ -180,6 +185,7 @@ struct WorkspaceActivity {
         } else {
             agent = best?.ref.agent
             agentState = best?.ref.state
+            agentSeen = best?.ref.seen ?? false
             taskID = best?.task.id
             if tasks.isEmpty {
                 tone = .idle
@@ -361,7 +367,7 @@ struct WorkspaceRowIcon: View {
 
     /// Clawd's pose for the row's agent: confetti for a finished turn nobody has looked at yet.
     private var clawd: ClawdPose {
-        let seen = activity.taskID.map { navigation.seenFinishedTaskIDs.contains($0) } ?? false
+        let seen = navigation.isTurnSeen(taskID: activity.taskID, centreSeen: activity.agentSeen)
         return ClawdPose(state: activity.agentState ?? "", seen: seen)
     }
 
