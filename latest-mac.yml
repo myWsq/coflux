@@ -1,8 +1,8 @@
-version: 2.26.1
+version: 2.27.0
 files:
-  - url: https://dl.coflux.dev/releases/v2.26.1/coflux-2.26.1-arm64.zip
-    sha512: k7wvkAGLKUcjMSe1J/jX2TYk//ugmAP+q6M/ZqzySVDx8nA0qZ0Fxg9BhxFYmQ6BqEVLwEv6i0lPWqLhIZvBCA==
-    size: 190049709
-path: https://dl.coflux.dev/releases/v2.26.1/coflux-2.26.1-arm64.zip
-sha512: k7wvkAGLKUcjMSe1J/jX2TYk//ugmAP+q6M/ZqzySVDx8nA0qZ0Fxg9BhxFYmQ6BqEVLwEv6i0lPWqLhIZvBCA==
-releaseDate: '2026-11-11T10:12:01.133Z'
+  - url: https://dl.coflux.dev/releases/v2.27.0/coflux-2.27.0-arm64.zip
+    sha512: h8cyBs+2I68DVC8a1QmqeuKLENbus/9N04VhkjXeB+QSP4Vq6vQJ1cLJQTodsFbIHAIBN8toMqhbjXQxpJ9AQw==
+    size: 190050682
+path: https://dl.coflux.dev/releases/v2.27.0/coflux-2.27.0-arm64.zip
+sha512: h8cyBs+2I68DVC8a1QmqeuKLENbus/9N04VhkjXeB+QSP4Vq6vQJ1cLJQTodsFbIHAIBN8toMqhbjXQxpJ9AQw==
+releaseDate: '2026-11-11T13:15:16.177Z'
