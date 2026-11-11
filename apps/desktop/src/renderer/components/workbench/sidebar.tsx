@@ -22,6 +22,8 @@ import { useScreenSessionState } from "@/components/workbench/screen-view";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { SidebarToggleButton } from "@/components/workbench/sidebar-collapse";
 import { SidebarResizeHandle } from "@/components/workbench/sidebar-resize-handle";
+import { SidebarSectionDivider } from "@/components/workbench/sidebar-section-divider";
+import { useSidebarSectionSizes } from "@/components/workbench/use-sidebar-section-sizes";
 import type { SidebarWidthControl } from "@/components/workbench/use-sidebar-width";
 import { projectWorkspacesInOrder, visibleProjects } from "@/components/workbench/workspace-order";
 import { workspaceActivity, workspaceProgress, type CofluxClient, type WorkspaceActivity } from "@coflux/client";
@@ -467,6 +469,8 @@ export function Sidebar(props: SidebarProps) {
   const createMenuProjectId = props.createMenuProjectId;
   const setCreateMenuProjectId = props.onCreateMenuProjectIdChange;
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
+  // 三区高度（VS Code SplitView 口径）：显式权重 + 可拖分隔条，见 use-sidebar-section-sizes.ts。
+  const sectionSizes = useSidebarSectionSizes();
 
   function toggleProject(projectId: string) {
     const known = new Set(client.store.getState().projects.map((project) => project.id));
@@ -569,30 +573,42 @@ export function Sidebar(props: SidebarProps) {
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
         {/* 「当前」 (plan 20261110-sidebar-current-terminals): the live agent terminals in tree
             order, never re-sorted; their workspaces stay in the tree below as well.
-            三区各自内滚：「当前」钉在顶部按内容高、超过 35% 自己滚，不随项目树滚走；
-            「项目」弹性占余下空间内部滚动；「设备」维持 42% 上限（本文件底部）。 */}
+            三区是显式高度的窗格（VS Code SplitView 口径）：flex-grow 权重 + basis-0，分隔条
+            只在相邻两区间挪空间，内容不足留白、超出各自内滚；表头 sticky 不随内容滚走。 */}
         {currentRows.length > 0 ? (
-          <section className="max-h-[35%] shrink-0 overflow-y-auto border-b border-border px-2 pb-2.5">
-            <div className="mb-1.5 flex h-7 items-center px-2">
-              <span className="text-sm text-muted-foreground">当前</span>
-            </div>
-            <div className="space-y-0.5">
-              {currentRows.map((row) => (
-                <TerminalRow
-                  key={row.task.id}
-                  row={row}
-                  progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
-                  selected={row.task.id === props.onScreenTaskId}
-                  seen={client.isTurnSeen(sessionAgents[row.task.sessionId ?? ""], seenSessions, row.task.sessionId ?? "")}
-                  onSelect={() => props.onLandOnTask(row.task.id)}
-                />
-              ))}
-            </div>
-          </section>
+          <>
+            <section
+              ref={sectionSizes.sectionRef("current")}
+              style={{ flexGrow: sectionSizes.weights.current }}
+              className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
+            >
+              <div className="sticky top-0 z-10 mb-1.5 flex h-7 items-center bg-sidebar px-2">
+                <span className="text-sm text-muted-foreground">当前</span>
+              </div>
+              <div className="space-y-0.5">
+                {currentRows.map((row) => (
+                  <TerminalRow
+                    key={row.task.id}
+                    row={row}
+                    progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
+                    selected={row.task.id === props.onScreenTaskId}
+                    seen={client.isTurnSeen(sessionAgents[row.task.sessionId ?? ""], seenSessions, row.task.sessionId ?? "")}
+                    onSelect={() => props.onLandOnTask(row.task.id)}
+                  />
+                ))}
+              </div>
+            </section>
+            <SidebarSectionDivider control={sectionSizes.divider("current", "projects")} />
+          </>
         ) : null}
 
-        <section className={cn("min-h-0 flex-1 overflow-y-auto px-2 pb-3", currentRows.length > 0 && "pt-1.5")}>
-          <div className="mb-1.5 flex h-7 items-center px-2">
+        <section
+          ref={sectionSizes.sectionRef("projects")}
+          style={{ flexGrow: sectionSizes.weights.projects }}
+          className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
+        >
+          {/* 表头 sticky 不随内容滚走；分隔条下的呼吸空间（pt-2）长在 sticky 块内，滚动时不漏内容。 */}
+          <div className="sticky top-0 z-10 mb-1.5 flex h-9 items-center bg-sidebar px-2 pt-2">
             <span className="text-sm text-muted-foreground">项目</span>
             <Tooltip content="导入项目">
               <button
@@ -768,8 +784,14 @@ export function Sidebar(props: SidebarProps) {
 
         </section>
 
-        <section className="max-h-[42%] shrink-0 overflow-y-auto border-t border-border px-2 py-2.5">
-          <div className="mb-1.5 flex h-7 items-center px-2">
+        <SidebarSectionDivider control={sectionSizes.divider("projects", "devices")} />
+
+        <section
+          ref={sectionSizes.sectionRef("devices")}
+          style={{ flexGrow: sectionSizes.weights.devices }}
+          className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
+        >
+          <div className="sticky top-0 z-10 mb-1.5 flex h-9 items-center bg-sidebar px-2 pt-2">
             <span className="text-sm text-muted-foreground">设备</span>
             <button
               className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
