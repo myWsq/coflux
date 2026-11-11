@@ -217,3 +217,19 @@ Out of scope: `crates/**` source other than generated code; `apps/server` beyond
 
 Centre first (hub change only, no migration), then desktop `v2.26.1` (also ships #136's agent
 glyph rows), then an `ios-<N>` tag.
+
+## Outcome
+
+DONE on `dev/20261111-agent-seen-sync` (`e3e1dba6` proto, `d1505ecc` centre, `3fc37f46` client,
+`a8058ffc` desktop, `baace002` iOS; baseline `bb680b00`). Executed by subagent(opus), no revision rounds.
+
+- Gates: `buf lint`, `buf breaking` against `origin/main`, `buf generate` zero diff; server `tsc`;
+  `packages/client` tests 106/106 (new `store-session-seen.test.ts`); desktop typecheck, lint,
+  600/600, build; `cargo build -p coflux-protocol`; Swift client 104/104 (new
+  `centreSeenMarkIsVisibleOnPresence`); iOS generic device build succeeded.
+- Deviations accepted: `SessionAgentState.seen` is optional (absent = not seen) so hand-built fixtures
+  stay valid; `isTurnSeen` is also on the client object; `markSessionSeen` does nothing while not
+  connected (desktop retries on reconnect through its presence subscription).
+- Known gap: an iPhone that marks a turn while disconnected keeps it seen locally but does not resend
+  after reconnecting, so other devices keep the confetti for that turn.
+- Not verified here: the cross-device walkthrough. Deploy order: centre first, then desktop, then iOS.
