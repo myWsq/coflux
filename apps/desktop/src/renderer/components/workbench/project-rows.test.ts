@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readExpandedProjects, summarizeProjectActivity, toggleExpandedProject, type ExpandedProjectsStore } from "./project-rows";
+import { ensureProjectExpanded, readExpandedProjects, summarizeProjectActivity, toggleExpandedProject, type ExpandedProjectsStore } from "./project-rows";
 
 function memoryStore(): ExpandedProjectsStore & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -56,6 +56,32 @@ test("存储内容损坏或直接抛错都只当作「全部折叠」，写不�
   };
   assert.deepEqual([...readExpandedProjects(hostile)], []);
   assert.deepEqual([...toggleExpandedProject(hostile, new Set(), "p1", known)], ["p1"]);
+});
+
+test("ensure：已展开原样返回且不写存储；未展开则加入并持久化，顺手丢掉已不存在的项目", () => {
+  const store = memoryStore();
+  const expanded: ReadonlySet<string> = new Set(["gone", "p1"]);
+  assert.equal(ensureProjectExpanded(store, expanded, "p1", known), expanded);
+  assert.equal(store.values.size, 0);
+
+  const added = ensureProjectExpanded(store, expanded, "p2", known);
+  assert.deepEqual([...added], ["p1", "p2"]);
+  assert.deepEqual([...readExpandedProjects(store)], ["p1", "p2"]);
+});
+
+test("ensure：存储抛错仍返回新集合", () => {
+  const hostile: ExpandedProjectsStore = {
+    key: "expanded",
+    storage: {
+      getItem: () => {
+        throw new Error("site data blocked");
+      },
+      setItem: () => {
+        throw new Error("site data blocked");
+      },
+    },
+  };
+  assert.deepEqual([...ensureProjectExpanded(hostile, new Set(), "p1", known)], ["p1"]);
 });
 
 test("折叠行的汇总：approval > question > error > active > done，待处理计数只数前三种", () => {

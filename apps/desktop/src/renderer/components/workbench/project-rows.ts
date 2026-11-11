@@ -52,6 +52,22 @@ export function toggleExpandedProject(
   return next;
 }
 
+/**
+ * Makes sure one project is expanded, writing like the toggle. Already expanded means the exact
+ * same set comes back and nothing is written — the caller (the sidebar's reveal-on-selection
+ * effect, plan 20261111-sidebar-follow-selection) runs on every jump, and most jumps land in an
+ * already-open project.
+ */
+export function ensureProjectExpanded(
+  store: ExpandedProjectsStore,
+  expanded: ReadonlySet<string>,
+  projectId: string,
+  knownProjectIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  if (expanded.has(projectId)) return expanded;
+  return toggleExpandedProject(store, expanded, projectId, knownProjectIds);
+}
+
 type ActiveActivity = Exclude<WorkspaceActivity, { status: "idle" }>;
 
 /** A collapsed row's trailing dots show the highest of these across its workspaces. */
