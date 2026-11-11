@@ -134,6 +134,11 @@ message SessionAgentRef {
   // 处理（但绝不因此丢掉承载它的 hook 事件）。生命周期同 progress——跨 hook 事件存活，
   // 随条目消失一起清掉；旧 worker 不发 = 空串 = 该终端没有纸面可看。
   string agent_session_id = 7;
+  // Set only by the centre on fan-out: true once any client of the account reported this finished
+  // turn ("done"/"waiting") as looked at (SessionSeen). The mark lives in the centre's memory and is
+  // cleared when the agent starts another turn or its session id changes. Daemons never set it and
+  // the centre ignores it on input.
+  bool seen = 8;
 }
 
 message TaskPorts {
