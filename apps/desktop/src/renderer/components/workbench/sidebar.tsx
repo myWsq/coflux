@@ -567,29 +567,31 @@ export function Sidebar(props: SidebarProps) {
         <SidebarToggleButton collapsed={false} onToggle={props.onCollapse} />
       </div>
       <div className="flex min-h-0 flex-1 flex-col pt-1.5">
-        <section className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {/* 「当前」 (plan 20261110-sidebar-current-terminals): the live agent terminals in tree
-              order, never re-sorted; their workspaces stay in the tree below as well. */}
-          {currentRows.length > 0 ? (
-            <div className="mb-3">
-              <div className="mb-1.5 flex h-7 items-center px-2">
-                <span className="text-sm text-muted-foreground">当前</span>
-              </div>
-              <div className="space-y-0.5">
-                {currentRows.map((row) => (
-                  <TerminalRow
-                    key={row.task.id}
-                    row={row}
-                    progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
-                    selected={row.task.id === props.onScreenTaskId}
-                    seen={client.isTurnSeen(sessionAgents[row.task.sessionId ?? ""], seenSessions, row.task.sessionId ?? "")}
-                    onSelect={() => props.onLandOnTask(row.task.id)}
-                  />
-                ))}
-              </div>
+        {/* 「当前」 (plan 20261110-sidebar-current-terminals): the live agent terminals in tree
+            order, never re-sorted; their workspaces stay in the tree below as well.
+            三区各自内滚：「当前」钉在顶部按内容高、超过 35% 自己滚，不随项目树滚走；
+            「项目」弹性占余下空间内部滚动；「设备」维持 42% 上限（本文件底部）。 */}
+        {currentRows.length > 0 ? (
+          <section className="max-h-[35%] shrink-0 overflow-y-auto border-b border-border px-2 pb-2.5">
+            <div className="mb-1.5 flex h-7 items-center px-2">
+              <span className="text-sm text-muted-foreground">当前</span>
             </div>
-          ) : null}
+            <div className="space-y-0.5">
+              {currentRows.map((row) => (
+                <TerminalRow
+                  key={row.task.id}
+                  row={row}
+                  progress={sessionAgents[row.task.sessionId ?? ""]?.progress || undefined}
+                  selected={row.task.id === props.onScreenTaskId}
+                  seen={client.isTurnSeen(sessionAgents[row.task.sessionId ?? ""], seenSessions, row.task.sessionId ?? "")}
+                  onSelect={() => props.onLandOnTask(row.task.id)}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
 
+        <section className={cn("min-h-0 flex-1 overflow-y-auto px-2 pb-3", currentRows.length > 0 && "pt-1.5")}>
           <div className="mb-1.5 flex h-7 items-center px-2">
             <span className="text-sm text-muted-foreground">项目</span>
             <Tooltip content="导入项目">
