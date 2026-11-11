@@ -3,7 +3,8 @@ import SwiftUI
 import SwiftTerm
 
 /// 激活终端的能力注册表：输入板据此决定方向键序列（DECCKM，plan 053）；
-/// 滚到底浮键经此触达激活任务的 TerminalView（plan 056）。
+/// 滚到底浮键经此触达激活任务的 TerminalView（plan 056）。The full keyboard also reads whether
+/// the program pushed kitty keyboard flags, which changes what ⇧⏎ and ⌥⏎ send.
 ///
 /// Process-wide and keyed by task id, so with several windows two terminal views of one task can
 /// overlap for a moment: SwiftUI does not order one window's `dismantleUIView` against another
@@ -17,6 +18,7 @@ final class TerminalModeRegistry {
     private struct Entry {
         let token: UUID
         let applicationCursor: () -> Bool
+        let keyboardEnhanced: () -> Bool
         let scrollToBottom: () -> Void
     }
 
@@ -26,9 +28,15 @@ final class TerminalModeRegistry {
         taskID: String,
         token: UUID,
         applicationCursor: @escaping () -> Bool,
+        keyboardEnhanced: @escaping () -> Bool,
         scrollToBottom: @escaping () -> Void
     ) {
-        entries[taskID] = Entry(token: token, applicationCursor: applicationCursor, scrollToBottom: scrollToBottom)
+        entries[taskID] = Entry(
+            token: token,
+            applicationCursor: applicationCursor,
+            keyboardEnhanced: keyboardEnhanced,
+            scrollToBottom: scrollToBottom
+        )
     }
 
     /// Removes the entry only while it is still the caller's.
@@ -39,6 +47,11 @@ final class TerminalModeRegistry {
 
     func applicationCursor(taskID: String) -> Bool {
         entries[taskID]?.applicationCursor() ?? false
+    }
+
+    /// Whether the terminal's program pushed any kitty keyboard enhancement flags.
+    func keyboardEnhanced(taskID: String) -> Bool {
+        entries[taskID]?.keyboardEnhanced() ?? false
     }
 
     func scrollToBottom(taskID: String) {
@@ -116,6 +129,9 @@ struct TerminalHostView: UIViewRepresentable {
             taskID: taskID,
             token: coordinator.registryToken,
             applicationCursor: { [weak uiView] in uiView?.terminalInputStateSnapshot()?.applicationCursor ?? false },
+            keyboardEnhanced: { [weak uiView] in
+                !(uiView?.terminalInputStateSnapshot()?.keyboardEnhancementFlags.isEmpty ?? true)
+            },
             scrollToBottom: { [weak uiView] in
                 guard let uiView else { return }
                 // A flick may still be decelerating: stop it first, or the momentum carries on

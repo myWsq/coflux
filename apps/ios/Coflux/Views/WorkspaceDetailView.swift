@@ -367,20 +367,31 @@ struct WorkspaceDetailView: View {
     }
 
     /// The tall layout (mockup T1/T2, plan D9): the whole page is one overlay arrangement — the
-    /// pager of terminals as the secondary view, the input area as the primary one. Fully open
-    /// there is no dividing region: the input overlays the terminal exactly as in the other
-    /// layouts, and the terminal ends above the resting dock. Half folded with a horizontal fold
-    /// (laptop pose) the system places the terminal before the fold and the input after it; the
-    /// input then carries the full keypad inline. The pose is read from the reserved regions only
-    /// — never from sensors or the window size — and both changes land in the same layout pass,
-    /// so the transition resizes the terminal once.
+    /// pager of terminals as the secondary view, the full-size keyboard as the primary one (it
+    /// replaces the dock here, mockup `20261110-ios-inner-tall-keyboard-mockup`). Fully open
+    /// there is no dividing region: the keyboard overlays the terminal, which ends above it at
+    /// 48 pt keys and resizes only when the keyboard's height changes, never while typing (D8).
+    /// Half folded with a horizontal fold (laptop pose) the system places the terminal before
+    /// the fold and the keyboard after it, top-aligned, its rows sharing the region's height.
+    /// The pose is read from the reserved regions only — never from sensors or the window size —
+    /// and both changes land in the same layout pass, so the transition resizes the terminal once.
     private var tallArrangement: some View {
         GeometryReader { proxy in
             let laptop = Self.isLaptopPose(proxy)
             ArrangementView {
-                dock(inlineKeypad: laptop)
-                    .frame(maxHeight: .infinity, alignment: laptop ? .top : .bottom)
-                    .overlayArrangementEdge(VerticalEdge.bottom)
+                // One reader in both poses, so the keyboard keeps its identity (and the fingers
+                // on it) across a pose change. Key sizes come from the region offered, never from
+                // the keyboard's measured height.
+                GeometryReader { region in
+                    fullKeyboard(
+                        keyHeight: laptop
+                            ? FullTerminalKeyboard.keyHeight(filling: region.size.height)
+                            : FullTerminalKeyboard.flatKeyHeight,
+                        laptop: laptop
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: laptop ? .top : .bottom)
+                }
+                .overlayArrangementEdge(VerticalEdge.bottom)
             } secondary: {
                 terminalColumn(reserveDock: !laptop)
                     .clipped()
@@ -625,7 +636,8 @@ struct WorkspaceDetailView: View {
                 }
             }
             .padding(.bottom, reserveDock ? restingDockHeight : 0)
-        .offset(y: reserveDock ? -keypadReveal : 0)
+        // The tall layout has no keypad to pull out.
+        .offset(y: reserveDock && layout != .tall ? -keypadReveal : 0)
     }
 
     /// 分页容器用 ScrollView：全部任务页同时挂载（各自 attach 保活），左右滑动切换。第一页再往回
@@ -695,6 +707,29 @@ struct WorkspaceDetailView: View {
             onKeypadDrag: { keypadDragChanged($0) },
             onKeypadDragEnd: { keypadDragEnded($0) },
             onKeypadToggle: { toggleKeypad() },
+            onOpenSecret: { openSecretSheet() },
+            onCompose: {
+                guard !dictationOverlayVisible else { return }
+                setComposing(true)
+            },
+            onDictatePrewarm: { prewarmDictation() },
+            onDictateBegin: { beginDictation() },
+            onDictateMove: { dictationZone = DictationZone.hit($0, in: dictationBounds) },
+            onDictateEnd: { endDictation() },
+            onDictateAbort: { abortDictation() }
+        )
+    }
+
+    /// The tall layout's keyboard, wired like the dock. Fully open its height is the resting
+    /// height the terminal ends above; in the laptop pose the terminal ends at the fold.
+    private func fullKeyboard(keyHeight: CGFloat, laptop: Bool) -> some View {
+        FullTerminalKeyboard(
+            client: client,
+            task: activeTask,
+            keyHeight: keyHeight,
+            onHeight: { height in
+                if !laptop { restingDockHeight = height }
+            },
             onOpenSecret: { openSecretSheet() },
             onCompose: {
                 guard !dictationOverlayVisible else { return }

@@ -1,0 +1,739 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>内屏竖屏全尺寸键盘</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Inner display, open tall (669 × 951 pt, measured on the Duo), drawn at true scale and zoomed to fit.
+   Layout: the live prototype on the left, the review panel (states, open decisions, sent bytes) on the right; the encoding contract below.
+   Single dark look; colours from apps/ios/Coflux/Views/Theme.swift. */
+:root {
+  --canvas: #0c0c0b; --ink: #e6e6e3; --muted: #8a8a82; --line: #242422; --warn: #c9a227;
+  --term: #0a0a0a; --bg: #0f0f0f; --surface: #151514; --card: #1b1b1a; --sec: #1f1f1e; --raise: #262624; --input: #2a2a28;
+  --fg: #e6e6e3; --fg2: #75756d; --ok: #4fae6e; --bad: #e05c6a; --info: #6b9bd1; --primary: #ececea; --onprimary: #0f0f0f;
+  --clay: #d97757; --mic: #ff9f0a;
+  --ui: -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+body { background: var(--canvas); color: var(--ink); font-family: var(--ui); }
+.page { max-width: 1440px; margin: 0 auto; padding-block: 28px 72px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 48px; }
+header { display: grid; gap: 10px; max-width: 82ch; }
+header h1 { font-size: 26px; line-height: 1.2; margin: 0; text-wrap: balance; }
+header p { margin: 0; color: #c8c8c2; font-size: 15px; line-height: 1.65; }
+.spec { font-family: var(--mono); font-size: 12px; color: var(--warn); letter-spacing: .04em; }
+code { font-family: var(--mono); font-size: .92em; color: var(--ink); background: var(--card); padding: 1px 5px; border-radius: 5px; }
+
+.lab { display: grid; gap: 28px; grid-template-columns: minmax(0, 700px) minmax(0, 1fr); align-items: start; }
+@media (max-width: 1080px) { .lab { grid-template-columns: minmax(0, 1fr); } }
+.fit { min-width: 0; position: relative; }
+.scaler { width: 687px; transform-origin: top left; }
+
+/* ---------- device ---------- */
+.dev { position: relative; overflow: hidden; background: var(--term); color: var(--fg); font-family: var(--ui); font-size: 15px; margin: 9px;
+  width: 669px; height: 951px; border-radius: 34px; display: flex; flex-direction: column;
+  box-shadow: 0 0 0 7px #050505, 0 0 0 8.5px #33332f, 0 30px 60px -24px rgba(0,0,0,.8); }
+.top { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.laptop .top { flex: none; height: 464px; }
+.fold { display: none; flex: none; height: 24px; position: relative;
+  background: linear-gradient(180deg, #050505 0%, #1a1a18 45%, #1a1a18 55%, #050505 100%); }
+.fold span { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--warn); font-family: var(--mono); }
+.laptop .fold { display: block; }
+.bottom { flex: none; display: flex; flex-direction: column; background: var(--bg); }
+.laptop .bottom { flex: 1; min-height: 0; }
+.laptop.al-top .bottom { justify-content: flex-start; }
+.laptop.al-bottom .bottom { justify-content: flex-end; }
+
+.status { flex: none; height: 24px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; }
+.status .r { display: flex; gap: 6px; align-items: center; }
+.micdot { width: 7px; height: 7px; border-radius: 50%; background: var(--mic); opacity: 0; transition: opacity .15s; }
+.mic-on .micdot { opacity: 1; }
+.batt { width: 22px; height: 11px; border: 1.5px solid var(--fg); border-radius: 3.5px; position: relative; }
+.batt::after { content: ""; position: absolute; inset: 1.5px; right: 5px; background: var(--fg); border-radius: 1.5px; }
+.nav { flex: none; height: 48px; margin-top: 2px; display: flex; align-items: center; gap: 12px; padding: 0 14px 0 14px; }
+.glass { background: rgba(48,48,45,.72); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 4px 14px rgba(0,0,0,.35); }
+.circ { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+svg.i { width: 20px; height: 20px; stroke: var(--fg); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.nav .ttl { flex: 1; min-width: 0; line-height: 1.25; }
+.nav .ttl b { display: block; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav .ttl small { display: block; color: var(--fg2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.avs { display: flex; }
+.av { width: 34px; height: 34px; border-radius: 50%; background: var(--card); display: grid; place-items: center; color: var(--clay); font-size: 17px; font-weight: 700;
+  box-shadow: 0 0 0 1px var(--term), 0 0 0 2px rgba(230,230,227,.18), 0 3px 8px rgba(0,0,0,.6); }
+.av.on { box-shadow: 0 0 0 1px var(--term), 0 0 0 2.5px #fff, 0 3px 8px rgba(0,0,0,.6); z-index: 2; }
+.av + .av { margin-left: -10px; }
+.av.sh { color: var(--fg2); font-family: var(--mono); font-size: 13px; }
+.caps { height: 44px; border-radius: 22px; display: flex; align-items: center; padding: 0 6px; flex: none; }
+.caps span { width: 42px; display: grid; place-items: center; }
+
+.termwrap { position: relative; flex: 1; min-height: 0; }
+.term { position: absolute; inset: 0; padding: 6px 12px 6px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 15.7px; color: #e4e4e4;
+  overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.term > div { white-space: pre-wrap; word-break: break-all; min-height: 15.7px; }
+.term .d { color: #6b6b66; } .term .g { color: var(--ok); } .term .c { color: var(--clay); } .term .r { color: var(--bad); } .term .y { color: var(--warn); }
+.term .u { color: #9a9a94; } .term .rule { color: #3a3a37; overflow: hidden; white-space: nowrap; }
+.term .add { color: #9fd8a9; background: rgba(79,174,110,.12); } .term .del { color: #f0a0a8; background: rgba(224,92,106,.12); }
+.term .sel { color: var(--info); }
+.cur { background: var(--fg); color: var(--term); }
+.banner { position: absolute; left: 12px; right: 12px; bottom: 10px; padding: 10px 14px; border-radius: 14px; background: var(--card); border: 1px solid var(--line);
+  font-size: 13px; color: var(--fg2); display: none; }
+.agent-off .banner { display: block; }
+
+/* ---------- keyboard ---------- */
+.kb { --kh: 48px; padding: 8px 4px 26px; display: grid; gap: 6px; touch-action: none; user-select: none; -webkit-user-select: none; position: relative; }
+.kb .row { display: grid; grid-template-columns: repeat(58, minmax(0, 1fr)); height: var(--kh); }
+.k { margin: 0 3px; border-radius: 12px; background: var(--input); border: 1px solid var(--line); display: grid; place-items: center; align-content: center; position: relative;
+  font: 500 19px/1 var(--ui); color: var(--fg); cursor: pointer; transition: opacity .08s ease-out; min-width: 0; }
+.k.fn { background: var(--sec); font: 600 13.5px/1 var(--mono); }
+.k.dual { gap: 3px; }
+.k.dual i { font-style: normal; font-size: 11.5px; color: var(--fg2); line-height: 1; }
+.k.dual b { font-weight: 500; font-size: 17px; line-height: 1; }
+.shifted .k.dual i { color: var(--fg); font-size: 16px; }
+.shifted .k.dual b { color: var(--fg2); font-size: 11.5px; }
+.shifted .k.dual { grid-auto-flow: row; }
+.k.down { opacity: .6; }
+.k.once { background: var(--primary); color: var(--onprimary); border-color: transparent; }
+.k.lock { background: var(--primary); color: var(--onprimary); border-color: transparent; }
+.k.lock::after { content: ""; position: absolute; bottom: 7px; left: 50%; width: 16px; margin-left: -8px; height: 2.5px; border-radius: 2px; background: currentColor; }
+.k.ent { background: var(--primary); color: var(--onprimary); border-color: transparent; font-size: 18px; }
+.k.red { color: var(--bad); }
+.k.sp { display: flex; gap: 7px; justify-content: center; align-items: center; font: 500 13px/1 var(--ui); color: var(--fg2); }
+.k.sp svg.i { width: 14px; height: 14px; stroke: var(--fg2); }
+.k.talking { background: rgba(255,159,10,.16); border-color: rgba(255,159,10,.45); color: var(--mic); }
+.k.cn { font: 600 15px/1 var(--ui); }
+.k.ph { font: 600 13px/1 var(--ui); }
+.k.fn.sym { font: 500 19px/1 var(--ui); }
+.gapk { min-width: 0; }
+.stack { margin: 0 3px; min-width: 0; display: grid; grid-template-rows: 1fr 1fr; gap: 3px; }
+.stack .k { margin: 0; border-radius: 9px; font-size: 13px; }
+.agent-off .kb .row { opacity: .45; pointer-events: none; }
+.home { position: absolute; bottom: 8px; left: 50%; width: 134px; margin-left: -67px; height: 5px; border-radius: 3px; background: rgba(230,230,227,.55); pointer-events: none; }
+
+/* ---------- dictation overlay ---------- */
+.ov { position: absolute; inset: 0; z-index: 30; display: none; }
+.dictating .ov.dict, .confirming .ov.dict, .composing .ov.comp { display: block; }
+.ov .scrim { position: absolute; inset: 0; background: rgba(10,10,10,.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.dict .tx { position: absolute; left: 40px; right: 40px; top: 240px; font-size: 22px; line-height: 1.5; color: var(--fg); text-wrap: pretty; }
+.dict .tx small { display: block; font-size: 13px; color: var(--fg2); margin-bottom: 10px; }
+.dict .tx .cursor { display: inline-block; width: 2px; height: 22px; background: var(--mic); vertical-align: -3px; margin-left: 2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dict .tx .cursor { animation: none; } .k { transition: none; } }
+.zones { position: absolute; left: 0; right: 0; display: flex; justify-content: center; gap: 150px; }
+.zone { width: 104px; height: 104px; border-radius: 50%; display: grid; place-items: center; align-content: center; gap: 6px; font-size: 14px; font-weight: 600;
+  background: rgba(48,48,45,.8); border: 1px solid rgba(255,255,255,.1); color: var(--fg); transition: transform .12s, background .12s; cursor: pointer; }
+.zone svg.i { width: 26px; height: 26px; }
+.zone.hit { transform: scale(1.12); background: var(--primary); color: var(--onprimary); }
+.zone.hit svg.i { stroke: var(--onprimary); }
+.zone.cancel.hit { background: var(--bad); color: #fff; }
+.zone.cancel.hit svg.i { stroke: #fff; }
+.dict .hint { position: absolute; left: 0; right: 0; text-align: center; font-size: 13px; color: var(--fg2); }
+.comp .card { position: absolute; left: 14px; right: 14px; border-radius: 26px; background: var(--card); border: 1px solid var(--line); padding: 14px 14px 12px 18px; display: grid; gap: 10px; }
+.comp textarea { background: transparent; border: 0; outline: 0; resize: none; color: var(--fg); font: 16px/1.5 var(--ui); min-height: 72px; }
+.comp .bar { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--fg2); }
+.comp .send { height: 38px; padding: 0 16px; border-radius: 19px; background: var(--primary); color: var(--onprimary); border: 0; font: 600 14px var(--ui); cursor: pointer; }
+.comp .syskb { position: absolute; left: 0; right: 0; bottom: 0; height: 330px; background: #2c2c2e; display: grid; place-items: center; color: #9a9a9f; font-size: 13px; text-align: center; line-height: 1.6; }
+
+/* ---------- panel ---------- */
+.panel { display: grid; gap: 22px; min-width: 0; }
+.grp { display: grid; gap: 10px; }
+.grp h2 { margin: 0; font-size: 13px; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.q { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: #121211; }
+.q h3 { margin: 0; font-size: 15px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; text-wrap: balance; }
+.q h3 .n { font-family: var(--mono); font-size: 12px; color: var(--warn); }
+.q p { margin: 0; font-size: 13px; line-height: 1.6; color: #b9b9b2; }
+.pick { display: flex; gap: 8px; flex-wrap: wrap; }
+.pick button { font: inherit; font-size: 13.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 99px; padding: 5px 13px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.pick button.on { background: var(--ink); color: var(--term); border-color: var(--ink); font-weight: 600; }
+.pick button .rec { font-size: 10.5px; font-weight: 700; color: var(--term); background: var(--warn); padding: 1px 6px; border-radius: 99px; }
+.pick button:focus-visible, .zone:focus-visible, .comp .send:focus-visible { outline: 2px solid var(--warn); outline-offset: 2px; }
+.readout { font-family: var(--mono); font-size: 12px; color: var(--warn); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--warn); }
+.tips { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; line-height: 1.55; color: #c8c8c2; }
+.log { display: grid; gap: 4px; font-family: var(--mono); font-size: 12px; min-height: 120px; align-content: start; }
+.log div { display: grid; grid-template-columns: 9.5em minmax(0, 1fr); gap: 10px; padding: 4px 8px; border-radius: 6px; background: #121211; }
+.log div:first-child { background: var(--card); }
+.log .lb { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log .by { color: var(--ink); word-break: break-all; }
+.log .by em { font-style: normal; color: var(--warn); }
+.log .empty { display: block; color: var(--muted); background: none; }
+
+/* ---------- contract ---------- */
+section.c { display: grid; gap: 18px; }
+section.c h2 { margin: 0; font-size: 22px; text-wrap: balance; }
+section.c > p { margin: 0; max-width: 82ch; color: #c8c8c2; font-size: 14.5px; line-height: 1.65; }
+.cols { display: grid; gap: 28px; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; }
+@media (max-width: 1000px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12.5px; }
+td.b { font-family: var(--mono); color: var(--warn); white-space: nowrap; }
+td.k1 { white-space: nowrap; font-family: var(--mono); }
+.rules { display: grid; gap: 16px; }
+.rules h3 { margin: 0 0 6px; font-size: 15px; }
+.rules ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 13.5px; line-height: 1.6; color: #c8c8c2; }
+</style>
+
+<div class="page">
+  <header>
+    <span class="spec">内屏竖开 669 × 951 pt · ShellLayout.tall（平摊与半折）· 取代 dock 与上滑额外键 · 外屏、横屏、分屏小窗不变</span>
+    <h1>内屏竖屏全尺寸键盘</h1>
+    <p>按键直接把字节发进终端，就像给手机接了一块 Mac 键盘：没有输入法、没有联想。中文走两条路：按住空格说话，或者点 Claude 行的「中文」打开成文层，用系统拼音键盘输入。最上面一行是 Claude 行：esc、⇧⇥ 切模式、^C、粘贴、中文。Claude 等你批准或回答时，键盘一个键都不变，用数字行的 1 2 3 或 ↑↓ ⏎ 回答。</p>
+    <p>左边是能操作的样机，右边是各处的取舍，以及刚刚发出去的字节。触屏上可以两根手指一起按，比如按住 ctrl 再点 c；用鼠标就靠修饰键的「点一下生效一次」。</p>
+  </header>
+
+  <div class="lab">
+    <div class="fit" id="fit"><div class="scaler" id="scaler">
+      <div class="dev agent-work" id="dev">
+        <div class="top">
+          <div class="status"><span>9:41</span><span class="r"><i class="micdot" aria-label="麦克风使用中"></i>
+            <svg class="i" viewBox="0 0 24 24" style="width:17px;height:17px"><path d="M2 8.5a15 15 0 0120 0M5.5 12a10 10 0 0113 0M9 15.5a5 5 0 016 0"/><circle cx="12" cy="19" r=".6"/></svg><i class="batt"></i></span></div>
+          <div class="nav">
+            <span class="circ glass"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9.5 4v16"/></svg></span>
+            <div class="ttl"><b>修复侧栏收起后终端不铺满</b><small>coflux · dev/20261109-ios-duo-inner-display · MacBook Pro</small></div>
+            <div class="avs"><span class="av on">✻</span><span class="av sh">$</span></div>
+            <span class="caps glass"><span><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span><span><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/></svg></span></span>
+          </div>
+          <div class="termwrap"><div class="term" id="term"></div><div class="banner">终端未运行：按键全部置灰，按了也不会发送。</div></div>
+        </div>
+        <div class="fold"><span>折痕</span></div>
+        <div class="bottom">
+          <div class="kb" id="kb"></div>
+        </div>
+        <i class="home"></i>
+
+        <div class="ov dict" id="ovDict">
+          <div class="scrim"></div>
+          <div class="tx" id="dictTx"><small>正在听…</small><span id="dictText"></span><i class="cursor"></i></div>
+          <div class="zones" id="zones">
+            <div class="zone cancel" id="zCancel" tabindex="0" role="button"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>取消</div>
+            <div class="zone send" id="zSend" tabindex="0" role="button"><svg class="i" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>发送</div>
+          </div>
+          <div class="hint" id="dictHint">滑到「发送」或「取消」再松手；直接松手可以先看一眼再决定</div>
+        </div>
+
+        <div class="ov comp" id="ovComp">
+          <div class="scrim" id="compScrim"></div>
+          <div class="card" id="compCard" style="bottom: 342px">
+            <textarea id="compText" aria-label="成文" placeholder="用拼音写 prompt，发送只上屏文字，不带回车"></textarea>
+            <div class="bar"><span>点卡片外面取消，草稿会留着</span><button class="send" id="compSend" type="button">发送</button></div>
+          </div>
+          <div class="syskb">系统键盘（拼音）<br>真机上由 iOS 绘制，盖住全尺寸键盘</div>
+        </div>
+      </div>
+    </div></div>
+
+    <div class="panel">
+      <div class="grp">
+        <h2>试一试</h2>
+        <ul class="tips">
+          <li>打一句英文，⇧⏎ 换行，⏎ 提交</li>
+          <li>点 ctrl 再点 c 清空输入；双击 ⇧ 锁定大写</li>
+          <li>按住空格说话，滑到「发送」松手</li>
+          <li>让终端弹出批准菜单：键盘不变，用数字行的 1 / 2 / 3，或 ↑↓ 选再 ⏎</li>
+          <li>切到「半折」，看键盘落到折痕下面</li>
+        </ul>
+      </div>
+
+      <div class="grp">
+        <h2>样机状态</h2>
+        <div class="q"><h3>姿态</h3><div class="pick" id="pPose"></div></div>
+        <div class="q"><h3>终端里的 Claude</h3><div class="pick" id="pAgent"></div></div>
+      </div>
+
+      <div class="grp">
+        <h2>已定 A 48 pt · B 填满 · D 写 · E 保留；C 还没定（默认 450 ms）</h2>
+        <div class="q"><h3><span class="n">A</span>平摊时的键高</h3>
+          <p>键越高越好按，终端就越矮。现在的 dock 键高 40；这块键盘字母键宽只有 40 左右，高一些手感更接近 iPad。</p>
+          <div class="pick" id="pKh"></div><span class="readout" id="rows"></span></div>
+        <div class="q"><h3><span class="n">B</span>半折时，折痕下面的空间怎么用</h3>
+          <p>折痕以下大约 463 pt，原尺寸键盘只占 352 pt 左右。</p>
+          <div class="pick" id="pLap"></div></div>
+        <div class="q"><h3><span class="n">C</span>按住空格多久才算说话</h3>
+          <p>轻点空格打出空格，绝不开麦。麦克风在判定前 120 ms 才预热，看状态栏的橙点。阈值短，说话起得快；阈值长，打字慢的时候不容易误触。</p>
+          <input type="range" id="hold" min="300" max="700" step="10" value="450" aria-label="长按阈值"><span class="readout" id="holdOut"></span></div>
+        <div class="q"><h3><span class="n">D</span>空格键上写不写「按住说话」</h3><div class="pick" id="pHint"></div></div>
+        <div class="q"><h3><span class="n">E</span>Claude 行留不留「粘贴」</h3>
+          <p>你选的布局预览里有它；竖屏下粘贴现在收在「更多」里。剪贴板里有图片时会先上传图片。</p>
+          <div class="pick" id="pPaste"></div></div>
+      </div>
+
+      <div class="grp">
+        <h2>刚发出的字节</h2>
+        <div class="log" id="log"><span class="empty">还没按键。</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="c">
+    <h2>按键发出什么</h2>
+    <p>只用传统 xterm 编码，不依赖 kitty 键盘协议，因此 Claude Code、shell、vim 都按同一套字节理解。方向键在应用光标模式下改发 <code>ESC O</code> 开头，沿用现有 dock 的判断。</p>
+    <div class="cols">
+      <div class="tw"><table>
+        <thead><tr><th>按法</th><th>发出</th><th>在 Claude Code 里</th></tr></thead>
+        <tbody>
+          <tr><td class="k1">⏎</td><td class="b">CR</td><td>提交</td></tr>
+          <tr><td class="k1">⇧⏎ 或 ⌥⏎</td><td class="b">ESC CR</td><td>换行，不提交（真机上要实测）</td></tr>
+          <tr><td class="k1">⇧⇥ 模式</td><td class="b">ESC [ Z</td><td>默认 → accept edits → plan mode；批准时等于选 2</td></tr>
+          <tr><td class="k1">esc</td><td class="b">ESC</td><td>打断当前回合；批准时等于选 3</td></tr>
+          <tr><td class="k1">ctrl → c</td><td class="b">ETX</td><td>清空输入，空输入时再按退出</td></tr>
+          <tr><td class="k1">ctrl → 字母</td><td class="b">字母 &amp; 0x1F</td><td>^R 搜历史、^U 删到行首、^A / ^E 行首行尾</td></tr>
+          <tr><td class="k1">ctrl → [ \ ]</td><td class="b">ESC FS GS</td><td></td></tr>
+          <tr><td class="k1">ctrl → space</td><td class="b">NUL</td><td></td></tr>
+          <tr><td class="k1">⌥ → 字符</td><td class="b">ESC + 字符</td><td>⌥b / ⌥f 按词移动</td></tr>
+          <tr><td class="k1">⌫ / ⌥⌫</td><td class="b">DEL / ESC DEL</td><td>删一个字符 / 删一个词</td></tr>
+          <tr><td class="k1">← ↑ → ↓</td><td class="b">ESC [ D A C B</td><td>移动光标、翻历史、在选项里上下</td></tr>
+          <tr><td class="k1">修饰 + 方向键</td><td class="b">ESC [ 1 ; m D…</td><td>m = 1 + ⇧1 + ⌥2 + ctrl4；⌥← ⌥→ 按词移动</td></tr>
+          <tr><td class="k1">⇥ / ⇧⇥</td><td class="b">TAB / ESC [ Z</td><td>补全 / 切模式</td></tr>
+          <tr><td class="k1">粘贴</td><td class="b">ESC [200~ … ESC [201~</td><td>bracketed paste，多行不会被当成提交</td></tr>
+        </tbody>
+      </table></div>
+      <div class="rules">
+        <div><h3>修饰键 ⇧ ctrl ⌥</h3><ul>
+          <li>点一下：亮起，只作用于下一个键，用完自动松开</li>
+          <li>点两下（300 ms 内）：锁定，键帽下方出现横线；再点一下解锁</li>
+          <li>按住它，再用另一根手指点键：像实体键盘一样组合，松手即恢复</li>
+          <li>⇧ 生效时字母变大写，数字和符号键换成上档字符</li>
+        </ul></div>
+        <div><h3>按下与松手</h3><ul>
+          <li>松手才发送；手指滑出键外就取消，什么都不发</li>
+          <li>⌫ 和方向键按住 0.35 s 开始连发，每 80 ms 一次</li>
+          <li>每次发送轻震一下</li>
+          <li>终端没在运行时整块键盘置灰</li>
+        </ul></div>
+        <div><h3>这一版不做</h3><ul>
+          <li>按下弹出放大气泡、空格滑动移光标、字母长按连发</li>
+          <li>自定义键位，外屏和横屏上的全尺寸键盘，外接实体键盘适配</li>
+        </ul></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = (id) => document.getElementById(id);
+const dev = $('dev'), kb = $('kb'), term = $('term');
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const S = {
+  pose: 'flat', agent: 'work', kh: 48, lap: 'fill', hold: 450, hint: 'cap', paste: 'keep',
+  mods: { shift: 'off', ctrl: 'off', alt: 'off' }, held: { shift: 0, ctrl: 0, alt: 0 }, lastTap: {},
+  input: [], cur: 0, mode: 0, sel: 0, busy: false, ctrlHint: false, log: [],
+  hist: [
+    '<span class="c">✻</span> <b>Claude Code</b>  <span class="d">~/coflux</span>',
+    '',
+    '<span class="u">&gt; 侧栏收起之后终端没有重新铺满，帮我看一下</span>',
+    '',
+    '<span class="c">⏺</span> 我先看 AppShell.swift 里侧栏宽度是怎么算的。',
+    '',
+    '<span class="g">⏺</span> <b>Read</b>(apps/ios/Coflux/Views/AppShell.swift)',
+    '  <span class="d">⎿  Read 312 lines</span>',
+    '',
+    '<span class="c">⏺</span> 找到了：splitLayout 在侧栏收起时仍按 fold 的宽度留了左边距。',
+    '  改成只在侧栏可见时留边距。',
+  ],
+};
+
+/* ---------- key map ---------- */
+const KEYS = {};
+const L = (s) => s.split('').map((c) => ({ ch: c }));
+const ROWS = [
+  [['`','~'],['1','!'],['2','@'],['3','#'],['4','$'],['5','%'],['6','^'],['7','&'],['8','*'],['9','('],['0',')'],['-','_'],['=','+'],
+    { id: 'bs', span: 6, label: '⌫', fn: 1, repeat: 1 }],
+  [{ id: 'tab', span: 6, label: 'tab', fn: 1 }, ...L('qwertyuiop'), ['[','{'], [']','}'], ['\\','|']],
+  [{ id: 'caps', span: 7, label: '⇪', fn: 1, action: 'caps' }, ...L('asdfghjkl'), [';',':'], ["'",'"'], { id: 'ret', span: 7, label: '⏎', enter: 1 }],
+  [{ id: 'shiftL', span: 8, label: '⇧', fn: 1, mod: 'shift' }, ...L('zxcvbnm'), [',','<'], ['.','>'], ['/','?'],
+    // ↑ full size, straight above ↓; no right ⇧ (user's call): the corner above → stays empty.
+    { id: 'up', span: 5, label: '↑', fn: 1, repeat: 1, arrow: 'A' }, { gap: 5 }],
+  // Space centred on the board: 15 columns either side of it. All four arrows one size.
+  [{ id: 'ctrl', span: 8, label: 'ctrl', fn: 1, mod: 'ctrl' }, { id: 'alt', span: 7, label: '⌥', fn: 1, mod: 'alt' }, { id: 'space', span: 28, space: 1 },
+    { id: 'left', span: 5, label: '←', fn: 1, repeat: 1, arrow: 'D' },
+    { id: 'down', span: 5, label: '↓', fn: 1, repeat: 1, arrow: 'B' },
+    { id: 'right', span: 5, label: '→', fn: 1, repeat: 1, arrow: 'C' }],
+];
+const norm = (k) => k.stack ? k : Array.isArray(k) ? { id: 'k' + k[0].charCodeAt(0), span: 4, base: k[0], up: k[1] }
+  : k.ch ? { id: 'k' + k.ch.charCodeAt(0), span: 4, base: k.ch, up: k.ch.toUpperCase(), letter: 1 } : k;
+
+function claudeRow() {
+  const row = [
+    { id: 'esc', span: 7, label: 'esc', fn: 1, bytes: '\x1b', name: 'esc' },
+    { id: 'mode', span: 10, label: '⇧⇥ 模式', fn: 1, bytes: '\x1b[Z', name: '⇧⇥ 模式' },
+    { id: 'cc', span: 7, label: '^C', fn: 1, red: 1, bytes: '\x03', name: '^C' },
+  ];
+  const mid = S.paste === 'keep' ? 18 : 25;
+  row.push({ gap: mid });
+  if (S.paste === 'keep') row.push({ id: 'paste', span: 7, label: '粘贴', fn: 1, ph: 1, action: 'paste' });
+  row.push({ id: 'cn', span: 9, label: '中文', fn: 1, cn: 1, action: 'compose' });
+  return row;
+}
+
+function capHTML(k) {
+  if (k.space) return S.hint === 'cap'
+    ? '<svg class="i" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></svg>按住说话' : 'space';
+  if (k.base != null) {
+    if (k.letter) return S.shiftOn ? k.up : k.base;
+    return `<i>${esc(k.up)}</i><b>${esc(k.base)}</b>`;
+  }
+  return esc(k.label);
+}
+
+function renderKB() {
+  const rows = [claudeRow(), ...ROWS.map((r) => r.map(norm))];
+  const keyHTML = (k, style) => {
+    KEYS[k.id] = k;
+    const cls = ['k', k.fn && 'fn', k.fn && k.label && [...k.label].length === 1 && 'sym', k.action === 'caps' && S.mods.shift === 'lock' && 'lock', k.base != null && !k.letter && 'dual', k.enter && 'ent', k.red && 'red', k.space && 'sp', k.cn && 'cn', k.ph && 'ph',
+      k.mod && S.mods[k.mod] !== 'off' && S.mods[k.mod], k.mod && S.held[k.mod] > 0 && S.mods[k.mod] === 'off' && 'once'].filter(Boolean).join(' ');
+    return `<div class="${cls}" data-id="${k.id}"${style}>${capHTML(k)}</div>`;
+  };
+  kb.innerHTML = rows.map((r) => '<div class="row">' + r.map((k) => {
+    if (k.gap) return `<span class="gapk" style="grid-column: span ${k.gap}"></span>`;
+    if (k.stack) return `<div class="stack" style="grid-column: span ${k.span}">${k.stack.map((s) => keyHTML(s, '')).join('')}</div>`;
+    return keyHTML(k, ` style="grid-column: span ${k.span}"`);
+  }).join('') + '</div>').join('');
+  kb.classList.toggle('shifted', !!S.shiftOn);
+  // A re-render (⇧ flips every cap) must not drop the keys still under a finger.
+  for (const t of active.values()) {
+    const el = kb.querySelector(`[data-id="${t.k.id}"]`); if (!el) continue;
+    t.el = el;
+    if (!t.cancelled) el.classList.add('down');
+    if (t.dict) el.classList.add('talking');
+  }
+}
+
+/* ---------- modifiers ---------- */
+const heldBy = {};
+const on = (m) => S.held[m] > 0 || S.mods[m] !== 'off';
+function refreshMods() {
+  const shift = on('shift');
+  if (shift !== S.shiftOn) { S.shiftOn = shift; renderKB(); return; }
+  for (const id of ['ctrl', 'alt', 'shiftL']) {
+    const el = kb.querySelector(`[data-id="${id}"]`); if (!el) continue;
+    const m = KEYS[id].mod;
+    el.classList.toggle('once', S.mods[m] === 'once' || (S.held[m] > 0 && S.mods[m] === 'off'));
+    el.classList.toggle('lock', S.mods[m] === 'lock');
+  }
+}
+function tapMod(m) {
+  const now = performance.now();
+  const st = S.mods[m];
+  if (st === 'lock') S.mods[m] = 'off';
+  else if (st === 'once' && now - (S.lastTap[m] || 0) < 300) S.mods[m] = 'lock';
+  else if (st === 'once') S.mods[m] = 'off';
+  else S.mods[m] = 'once';
+  S.lastTap[m] = now;
+}
+function consumeMods() {
+  for (const m of ['shift', 'ctrl', 'alt']) {
+    if (S.mods[m] === 'once') S.mods[m] = 'off';
+    if (S.held[m] > 0 && heldBy[m]) heldBy[m].used = true;
+  }
+  refreshMods();
+}
+
+/* ---------- encoding ---------- */
+function ctrlByte(base) {
+  if (/^[a-z]$/.test(base)) return String.fromCharCode(base.charCodeAt(0) - 96);
+  return { '[': '\x1b', '\\': '\x1c', ']': '\x1d', '2': '\x00', '6': '\x1e', '-': '\x1f' }[base] ?? null;
+}
+function encode(k) {
+  const m = { shift: on('shift'), ctrl: on('ctrl'), alt: on('alt') };
+  const pre = [m.ctrl && 'ctrl', m.alt && '⌥', m.shift && '⇧'].filter(Boolean).join(' + ');
+  const nm = (n) => (pre ? pre + ' + ' : '') + n;
+  if (k.bytes) return [k.bytes, k.name];
+  if (k.base != null) {
+    let ch = m.shift ? k.up : k.base, name = ch;
+    if (m.ctrl) { const c = ctrlByte(k.base); if (c != null) { ch = c; name = 'ctrl + ' + k.base; } }
+    if (m.alt) { ch = '\x1b' + ch; name = '⌥ + ' + name; }
+    return [ch, m.ctrl || m.alt ? name : ch];
+  }
+  if (k.space) return m.ctrl ? ['\x00', nm('space')] : [m.alt ? '\x1b ' : ' ', nm('space')];
+  if (k.id === 'tab') return m.shift ? ['\x1b[Z', '⇧⇥'] : ['\t', 'tab'];
+  if (k.enter) return m.shift || m.alt ? ['\x1b\r', nm('⏎')] : ['\r', '⏎'];
+  if (k.id === 'bs') return m.alt ? ['\x1b\x7f', '⌥⌫'] : ['\x7f', '⌫'];
+  if (k.arrow) {
+    const p = 1 + (m.shift ? 1 : 0) + (m.alt ? 2 : 0) + (m.ctrl ? 4 : 0);
+    return [p > 1 ? `\x1b[1;${p}${k.arrow}` : `\x1b[${k.arrow}`, nm(k.label)];
+  }
+  return [null, ''];
+}
+
+/* ---------- sending ---------- */
+const C0 = { 0: 'NUL', 3: 'ETX', 9: 'TAB', 13: 'CR', 27: 'ESC', 28: 'FS', 29: 'GS', 127: 'DEL' };
+function showBytes(b) {
+  const out = []; let run = '';
+  const flush = () => { if (run) { out.push(esc(run.replace(/ /g, '␠'))); run = ''; } };
+  for (const ch of b) {
+    const c = ch.charCodeAt(0);
+    if (c < 32 || c === 127) { flush(); out.push(`<em>${C0[c] || '^' + String.fromCharCode(c + 64)}</em>`); }
+    else run += ch;
+  }
+  flush();
+  return out.join(' ');
+}
+function send(bytes, label) {
+  if (S.agent === 'off') return;
+  try { navigator.vibrate && navigator.vibrate(6); } catch (e) {}
+  S.log.unshift([label, bytes]); S.log.length = Math.min(S.log.length, 10);
+  $('log').innerHTML = S.log.map(([l, b]) => `<div><span class="lb">${esc(l)}</span><span class="by">${showBytes(b.length > 60 ? b.slice(0, 57) + '…' : b)}</span></div>`).join('');
+  interpret(bytes);
+}
+function fire(k) {
+  if (k.action === 'compose') { openCompose(); return; }
+  if (k.action === 'caps') { S.mods.shift = S.mods.shift === 'lock' ? 'off' : 'lock'; refreshMods(); renderKB(); return; }
+  if (k.action === 'paste') { send('\x1b[200~apps/ios/Coflux/Views/AppShell.swift:130\x1b[201~', '粘贴'); return; }
+  const [b, name] = encode(k);
+  consumeMods();
+  if (b != null) send(b, name);
+}
+
+/* ---------- a tiny Claude Code ---------- */
+const MODES = ['<span class="d">  ? for shortcuts</span>', '<span class="p" style="color:#c678dd">  ⏵⏵ accept edits on</span> <span class="d">(shift+tab to cycle)</span>',
+  '<span class="sel">  ⏸ plan mode on</span> <span class="d">(shift+tab to cycle)</span>'];
+const OPTS = ['Yes', 'Yes, allow all edits during this session (shift+tab)', 'No, and tell Claude what to do differently (esc)'];
+const isWord = (c) => /[\w\u4e00-\u9fff]/.test(c);
+function wordLeft() { let i = S.cur; while (i > 0 && !isWord(S.input[i - 1])) i--; while (i > 0 && isWord(S.input[i - 1])) i--; return i; }
+function wordRight() { let i = S.cur; const n = S.input.length; while (i < n && !isWord(S.input[i])) i++; while (i < n && isWord(S.input[i])) i++; return i; }
+function insert(t) { const a = [...t]; S.input.splice(S.cur, 0, ...a); S.cur += a.length; S.ctrlHint = false; }
+function resolve(n) {
+  if (n === 3) S.hist.push('', '<span class="g">⏺</span> <b>Update</b>(apps/ios/Coflux/Views/AppShell.swift)', '  <span class="r">⎿  User rejected update to AppShell.swift</span>');
+  else {
+    S.hist.push('', '<span class="g">⏺</span> <b>Update</b>(apps/ios/Coflux/Views/AppShell.swift)', '  <span class="d">⎿  Updated with 1 addition and 1 removal</span>');
+    if (n === 2) S.mode = 1;
+  }
+  setAgent('work');
+}
+function interpret(b) {
+  const wait = S.agent === 'wait';
+  let m;
+  if (wait) {
+    if (/^[123]$/.test(b)) return resolve(+b);
+    if (b === '\r') return resolve(S.sel + 1);
+    if (b === '\x1b') return resolve(3);
+    if (b === '\x1b[Z') return resolve(2);
+    if ((m = b.match(/^\x1b\[(?:1;\d)?([AB])$/))) { S.sel = (S.sel + (m[1] === 'B' ? 1 : 2)) % 3; return render(); }
+    return;
+  }
+  if (b.startsWith('\x1b[200~')) insert(b.slice(6, -6));
+  else if (b === '\r') submit();
+  else if (b === '\x1b\r') insert('\n');
+  else if (b === '\x7f') { if (S.cur > 0) { S.input.splice(S.cur - 1, 1); S.cur--; } }
+  else if (b === '\x1b\x7f' || b === '\x17') { const i = wordLeft(); S.input.splice(i, S.cur - i); S.cur = i; }
+  else if (b === '\x1b[Z') S.mode = (S.mode + 1) % 3;
+  else if (b === '\x03') { if (S.input.length) { S.input = []; S.cur = 0; } else S.ctrlHint = true; }
+  else if (b === '\x01') S.cur = 0;
+  else if (b === '\x05') S.cur = S.input.length;
+  else if (b === '\x15') { S.input.splice(0, S.cur); S.cur = 0; }
+  else if (b === '\x0b') S.input.splice(S.cur);
+  else if (b === '\x1bb') S.cur = wordLeft();
+  else if (b === '\x1bf') S.cur = wordRight();
+  else if ((m = b.match(/^\x1b\[(?:1;(\d))?([ABCD])$/))) {
+    const word = m[1] && ((+m[1] - 1) & 2);
+    if (m[2] === 'D') S.cur = word ? wordLeft() : Math.max(0, S.cur - 1);
+    if (m[2] === 'C') S.cur = word ? wordRight() : Math.min(S.input.length, S.cur + 1);
+  }
+  else if (b === '\x1b' || b.length === 0) {}
+  else if (b.charCodeAt(0) >= 32 && b.charCodeAt(0) !== 127) insert(b);
+  render();
+}
+function submit() {
+  const text = S.input.join('');
+  if (!text.trim()) return;
+  const lines = text.split('\n');
+  S.hist.push('', ...lines.map((l, i) => `<span class="u">${i ? '  ' : '&gt; '}${esc(l)}</span>`));
+  S.input = []; S.cur = 0; S.busy = true; S.ctrlHint = false;
+  render();
+  setTimeout(() => {
+    S.busy = false;
+    if (text.startsWith('/')) S.hist.push(`  <span class="d">⎿  （样机）已执行 ${esc(text.split(/\s/)[0])}</span>`);
+    else S.hist.push('', `<span class="c">⏺</span> 收到${lines.length > 1 ? `，一共 ${lines.length} 行` : ''}。样机不连真实终端，只回显你发出的内容。`);
+    render();
+  }, 650);
+}
+function inputHTML() {
+  const a = S.input.map((c) => (c === '\n' ? '\n' : esc(c)));
+  const at = a[S.cur];
+  const curSpan = at == null || at === '\n' ? '<span class="cur"> </span>' + (at === '\n' ? '\n' : '') : `<span class="cur">${at}</span>`;
+  const s = a.slice(0, S.cur).join('') + curSpan + a.slice(S.cur + 1).join('');
+  return s.split('\n').map((l, i) => `<div>${i ? '  ' : '&gt; '}${l}</div>`).join('');
+}
+const RULE = '<div class="rule">' + '─'.repeat(140) + '</div>';
+function render() {
+  let h = S.hist.map((l) => `<div>${l}</div>`).join('');
+  if (S.agent === 'wait') {
+    h += '<div></div>' + RULE + '<div> <b>Edit file</b>  <span class="d">apps/ios/Coflux/Views/AppShell.swift</span></div>'
+      + '<div class="del"> 130 -  .padding(.leading, fold?.width ?? 0)</div>'
+      + '<div class="add"> 130 +  .padding(.leading, sidebarVisible ? (fold?.width ?? 0) : 0)</div><div></div>'
+      + '<div> Do you want to make this edit to <b>AppShell.swift</b>?</div>'
+      + OPTS.map((o, i) => `<div class="${i === S.sel ? 'sel' : ''}"> ${i === S.sel ? '❯' : ' '} ${i + 1}. ${esc(o)}</div>`).join('') + RULE;
+  } else {
+    if (S.busy) h += '<div></div><div><span class="c">✻</span> <span class="d">Thinking…</span></div>';
+    h += '<div></div>' + RULE + inputHTML() + RULE
+      + `<div>${S.ctrlHint ? '<span class="d">  Press Ctrl-C again to exit</span>' : MODES[S.mode]}</div>`;
+  }
+  term.innerHTML = h;
+}
+
+/* ---------- pointer handling ---------- */
+const active = new Map();
+const inside = (el, e, pad) => { const r = el.getBoundingClientRect(); return e.clientX >= r.left - pad && e.clientX <= r.right + pad && e.clientY >= r.top - pad && e.clientY <= r.bottom + pad; };
+function stopTimers(t) { clearTimeout(t.hold); clearInterval(t.iv); clearTimeout(t.pre); clearTimeout(t.talk); }
+kb.addEventListener('pointerdown', (e) => {
+  if (S.agent === 'off' || dev.classList.contains('confirming')) return;
+  const el = e.target.closest('.k'); if (!el) return;
+  e.preventDefault();
+  try { kb.setPointerCapture(e.pointerId); } catch (err) {}
+  const k = KEYS[el.dataset.id];
+  const t = { k, el };
+  active.set(e.pointerId, t);
+  el.classList.add('down');
+  if (k.mod) { S.held[k.mod]++; heldBy[k.mod] = t; t.used = false; refreshMods(); return; }
+  if (k.repeat) t.hold = setTimeout(() => { t.repeating = true; fire(k); t.iv = setInterval(() => fire(k), 80); }, 350);
+  if (k.space) {
+    t.pre = setTimeout(() => dev.classList.add('mic-on'), Math.max(0, S.hold - 120));
+    t.talk = setTimeout(() => beginDict(t), S.hold);
+  }
+});
+kb.addEventListener('pointermove', (e) => {
+  const t = active.get(e.pointerId); if (!t || t.cancelled) return;
+  if (t.dict) { dictMove(e); return; }
+  if (!t.k.mod && !inside(t.el, e, 6)) { t.cancelled = true; stopTimers(t); t.el.classList.remove('down'); if (t.k.space) dev.classList.remove('mic-on'); }
+});
+function release(e, cancelled) {
+  const t = active.get(e.pointerId); if (!t) return;
+  active.delete(e.pointerId);
+  stopTimers(t);
+  const el = kb.querySelector(`[data-id="${t.k.id}"]`) || t.el;
+  el.classList.remove('down');
+  if (t.k.mod) {
+    S.held[t.k.mod] = Math.max(0, S.held[t.k.mod] - 1);
+    if (!t.used && !cancelled) tapMod(t.k.mod);
+    refreshMods(); return;
+  }
+  if (t.dict) { cancelled ? endDict('cancel') : endDict(); return; }
+  if (t.k.space) dev.classList.remove('mic-on');
+  if (!t.cancelled && !t.repeating && !cancelled) fire(t.k);
+}
+kb.addEventListener('pointerup', (e) => release(e, false));
+kb.addEventListener('pointercancel', (e) => release(e, true));
+
+/* ---------- dictation ---------- */
+const PHRASE = '把侧栏收起的动画改成跟手的，松手时按速度决定收起还是展开，横屏也一样';
+let dictTimer = null, zone = null, said = '';
+function placeZones() {
+  const kbTop = kb.getBoundingClientRect().top - dev.getBoundingClientRect().top;
+  const s = scale();
+  const y = kbTop / s;
+  $('zones').style.top = (y - 150) + 'px';
+  $('dictHint').style.top = (y - 34) + 'px';
+}
+function beginDict(t) {
+  t.dict = true;
+  dev.classList.add('mic-on', 'dictating');
+  t.el.classList.add('talking');
+  try { navigator.vibrate && navigator.vibrate(14); } catch (e) {}
+  placeZones();
+  said = ''; zone = null; setZone(null);
+  $('dictTx').querySelector('small').textContent = '正在听…';
+  let i = 0;
+  dictTimer = setInterval(() => { if (i < PHRASE.length) { said += PHRASE[i++]; $('dictText').textContent = said; } }, 90);
+}
+function setZone(z) {
+  zone = z;
+  $('zCancel').classList.toggle('hit', z === 'cancel');
+  $('zSend').classList.toggle('hit', z === 'send');
+}
+function dictMove(e) {
+  setZone(inside($('zSend'), e, 14) ? 'send' : inside($('zCancel'), e, 14) ? 'cancel' : null);
+}
+function endDict(forced) {
+  clearInterval(dictTimer);
+  dev.classList.remove('mic-on');
+  kb.querySelectorAll('.talking').forEach((el) => el.classList.remove('talking'));
+  const z = forced || zone;
+  if (z === 'send') return finishDict(true);
+  if (z === 'cancel') return finishDict(false);
+  dev.classList.remove('dictating');
+  dev.classList.add('confirming');
+  $('dictTx').querySelector('small').textContent = '说完了，点「发送」或「取消」';
+  $('dictHint').textContent = '';
+}
+function finishDict(sendIt) {
+  dev.classList.remove('dictating', 'confirming');
+  setZone(null);
+  $('dictHint').textContent = '滑到「发送」或「取消」再松手；直接松手可以先看一眼再决定';
+  if (sendIt && said) send(said, '说话');
+}
+$('zSend').addEventListener('click', () => { if (dev.classList.contains('confirming')) finishDict(true); });
+$('zCancel').addEventListener('click', () => { if (dev.classList.contains('confirming')) finishDict(false); });
+for (const id of ['zSend', 'zCancel']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(id).click(); } });
+
+/* ---------- compose ---------- */
+function openCompose() { dev.classList.add('composing'); setTimeout(() => $('compText').focus(), 0); }
+$('compScrim').addEventListener('click', () => dev.classList.remove('composing'));
+$('compSend').addEventListener('click', () => {
+  const v = $('compText').value.replace(/\n/g, ' ');
+  dev.classList.remove('composing');
+  if (v) { send(v, '中文成文'); $('compText').value = ''; }
+});
+
+/* ---------- layout ---------- */
+const scale = () => parseFloat($('scaler').dataset.s || '1');
+function fitDevice() {
+  const fit = $('fit');
+  const s = Math.min(1, fit.clientWidth / 687, Math.max(0.35, (window.innerHeight - 24) / 969));
+  $('scaler').style.transform = `scale(${s})`;
+  $('scaler').dataset.s = s;
+  fit.style.height = (969 * s) + 'px';
+}
+function applyLayout() {
+  dev.classList.toggle('laptop', S.pose === 'laptop');
+  dev.classList.toggle('al-top', S.lap === 'top');
+  dev.classList.toggle('al-bottom', S.lap === 'bottom');
+  let kh = S.kh;
+  if (S.pose === 'laptop' && S.lap === 'fill') kh = Math.min(64, Math.floor((463 - 34 - 30) / 6));
+  kb.style.setProperty('--kh', kh + 'px');
+  requestAnimationFrame(() => {
+    const rows = Math.floor((term.clientHeight - 12) / 15.7);
+    const kbH = Math.round(kb.getBoundingClientRect().height / scale());
+    $('rows').textContent = S.pose === 'laptop'
+      ? `半折：键高 ${kh} pt，键盘 ${kbH} pt，终端 ${rows} 行`
+      : `平摊：键盘 ${kbH} pt，终端 ${rows} 行（键高 40 时 ${Math.floor((951 - 74 - 6 * 40 - 30 - 34 - 12) / 15.7)} 行）`;
+  });
+}
+function setAgent(a) {
+  S.agent = a; S.sel = 0;
+  dev.classList.remove('agent-work', 'agent-wait', 'agent-off'); dev.classList.add('agent-' + a);
+  pickers.agent.set(a);
+  renderKB(); render(); applyLayout();
+}
+
+const pickers = {};
+function picker(id, key, opts, after) {
+  const box = $(id);
+  const set = (v) => { box.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === String(v))); };
+  box.innerHTML = opts.map(([v, label, rec]) => `<button type="button" data-v="${v}">${label}${rec ? '<span class="rec">推荐</span>' : ''}</button>`).join('');
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const v = isNaN(+b.dataset.v) ? b.dataset.v : +b.dataset.v;
+    if (key === 'agent') return setAgent(v);
+    S[key] = v; set(v); after && after();
+  });
+  set(S[key]);
+  pickers[key] = { set };
+}
+picker('pPose', 'pose', [['flat', '平摊'], ['laptop', '半折（折痕横向）']], applyLayout);
+picker('pAgent', 'agent', [['work', '工作中'], ['wait', '弹出批准菜单'], ['off', '终端未运行']]);
+picker('pKh', 'kh', [[44, '44 pt'], [48, '48 pt', 1], [52, '52 pt']], applyLayout);
+picker('pLap', 'lap', [['fill', '键变高，填满', 1], ['top', '原尺寸，紧贴折痕'], ['bottom', '原尺寸，靠下']], applyLayout);
+picker('pHint', 'hint', [['cap', '写「按住说话」', 1], ['plain', '只写 space']], renderKB);
+picker('pPaste', 'paste', [['keep', '保留', 1], ['drop', '去掉']], () => { renderKB(); });
+const holdOut = () => { $('holdOut').textContent = `按住 ${S.hold} ms 开始说话，${S.hold - 120} ms 时麦克风预热`; };
+$('hold').addEventListener('input', (e) => { S.hold = +e.target.value; holdOut(); });
+holdOut();
+
+renderKB(); render();
+fitDevice(); applyLayout();
+new ResizeObserver(() => { fitDevice(); }).observe($('fit'));
+window.addEventListener('resize', fitDevice);
+})();
+</script>
