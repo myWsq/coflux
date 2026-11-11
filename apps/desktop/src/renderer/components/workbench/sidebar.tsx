@@ -580,7 +580,7 @@ export function Sidebar(props: SidebarProps) {
             <section
               ref={sectionSizes.sectionRef("current")}
               style={{ flexGrow: sectionSizes.weights.current }}
-              className="min-h-16 basis-0 overflow-y-auto px-2 pb-2.5"
+              className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
             >
               <div className="sticky top-0 z-10 mb-1.5 flex h-7 items-center bg-sidebar px-2">
                 <span className="text-sm text-muted-foreground">当前</span>
@@ -605,9 +605,10 @@ export function Sidebar(props: SidebarProps) {
         <section
           ref={sectionSizes.sectionRef("projects")}
           style={{ flexGrow: sectionSizes.weights.projects }}
-          className="min-h-16 basis-0 overflow-y-auto px-2 pb-3"
+          className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
         >
-          <div className="sticky top-0 z-10 mb-1.5 flex h-7 items-center bg-sidebar px-2">
+          {/* 表头 sticky 不随内容滚走；分隔条下的呼吸空间（pt-2）长在 sticky 块内，滚动时不漏内容。 */}
+          <div className="sticky top-0 z-10 mb-1.5 flex h-9 items-center bg-sidebar px-2 pt-2">
             <span className="text-sm text-muted-foreground">项目</span>
             <Tooltip content="导入项目">
               <button
@@ -788,9 +789,9 @@ export function Sidebar(props: SidebarProps) {
         <section
           ref={sectionSizes.sectionRef("devices")}
           style={{ flexGrow: sectionSizes.weights.devices }}
-          className="min-h-16 basis-0 overflow-y-auto px-2 pb-2.5"
+          className="scrollbar-on-hover min-h-16 basis-0 overflow-y-auto px-2 pb-1.5"
         >
-          <div className="sticky top-0 z-10 mb-1.5 flex h-7 items-center bg-sidebar px-2">
+          <div className="sticky top-0 z-10 mb-1.5 flex h-9 items-center bg-sidebar px-2 pt-2">
             <span className="text-sm text-muted-foreground">设备</span>
             <button
               className="ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
