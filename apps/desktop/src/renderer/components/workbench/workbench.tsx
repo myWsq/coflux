@@ -1814,6 +1814,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
         onSelectWorkspace={selectWorkspace}
         onScreenTaskId={onScreenTaskId}
+        visibleTaskIds={screen.visible}
         onLandOnTask={landOnTask}
         selectedDeviceId={selection?.kind === "device" ? selection.id : null}
         onSelectDevice={selectDevice}
