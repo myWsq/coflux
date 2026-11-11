@@ -35,6 +35,14 @@ const RTT_GOOD_MS = 200;
 
 const IDLE: WorkspaceActivity = { status: "idle" };
 
+/** 把侧栏里带 data-reveal-key 的行滚进视野（nearest：已可见不动）；行还没渲染出来返回 false。 */
+function scrollRevealTarget(root: HTMLElement | null, key: string): boolean {
+  const row = root?.querySelector(`[data-reveal-key="${CSS.escape(key)}"]`);
+  if (!row) return false;
+  row.scrollIntoView({ block: "nearest" });
+  return true;
+}
+
 /** The expanded projects (plan 20261109-sidebar-current-section), injected into the pure store module. */
 const EXPANDED_PROJECTS_STORE: ExpandedProjectsStore = { storage: localStorage, key: PROJECTS_EXPANDED_KEY };
 
@@ -464,48 +472,47 @@ export function Sidebar(props: SidebarProps) {
   }
 
   // 「定位到选中」（plan 20261111-sidebar-follow-selection）：跳转或启动恢复把选中落到侧栏上
-  // ——展开所在项目并把行滚进视野。依赖里刻意没有 expandedIds：手动折叠选中项目要能留住，
-  // 直到下一次跳转。pendingRevealRef 解决「本次展开、行要到下一次渲染才存在」的时序，也顺带
-  // 覆盖启动时选中先于快照到达（行随数据出现后补滚）。
+  // ——展开所在项目并把行滚进视野。触发键是 (revealNonce, selectedProjectId)：nonce 覆盖
+  // 「跳回已选中的工作区」，projectId 覆盖启动时选中先于快照到达（数据出现才解析得出）；
+  // 刻意不响应 expandedIds，手动折叠选中项目要能留住，直到下一次跳转。
   const asideRef = useRef<HTMLElement | null>(null);
   const pendingRevealRef = useRef<string | null>(null);
   const selectedWorkspace = props.selectedWorkspaceId
     ? workspaces.find((workspace) => workspace.id === props.selectedWorkspaceId)
     : undefined;
-  // 目录工作区没有可见的项目行（landmine）：解析不到就只记 pending，永远滚不到也无妨。
+  // 目录工作区没有可见的项目行：解析不到就只记 pending，永远滚不到也无妨。
   const selectedProjectId =
     selectedWorkspace && projects.some((project) => project.id === selectedWorkspace.projectId)
       ? selectedWorkspace.projectId
       : null;
 
-  function scrollRevealTarget(key: string): boolean {
-    const row = asideRef.current?.querySelector(`[data-reveal-key="${CSS.escape(key)}"]`);
-    if (!row) return false;
-    row.scrollIntoView({ block: "nearest" });
-    return true;
+  // 展开走渲染期「随 props 调整状态」而非 effect（react/set-state-in-effect 门禁）；ensure 的
+  // 「已展开原样返回」保证多数跳转（落在已展开项目）不触发额外一轮渲染。
+  const [revealed, setRevealed] = useState<{ nonce: number; projectId: string | null }>({ nonce: -1, projectId: null });
+  if (revealed.nonce !== props.revealNonce || revealed.projectId !== selectedProjectId) {
+    setRevealed({ nonce: props.revealNonce, projectId: selectedProjectId });
+    if (selectedProjectId) {
+      const known = new Set(allProjects.map((project) => project.id));
+      setExpandedIds(ensureProjectExpanded(EXPANDED_PROJECTS_STORE, expandedIds, selectedProjectId, known));
+    }
   }
 
   useEffect(() => {
     if (!props.selectedWorkspaceId) return;
-    if (selectedProjectId) {
-      const known = new Set(client.store.getState().projects.map((project) => project.id));
-      // 函数式更新 + ensure 的「已展开原样返回」：多数跳转落在已展开的项目，不触发重渲染。
-      setExpandedIds((expanded) => ensureProjectExpanded(EXPANDED_PROJECTS_STORE, expanded, selectedProjectId, known));
-    }
     const key = `workspace:${props.selectedWorkspaceId}`;
-    pendingRevealRef.current = scrollRevealTarget(key) ? null : key;
+    pendingRevealRef.current = scrollRevealTarget(asideRef.current, key) ? null : key;
   }, [props.revealNonce, props.selectedWorkspaceId, selectedProjectId]);
 
   useEffect(() => {
     if (!props.selectedDeviceId) return;
     const key = `device:${props.selectedDeviceId}`;
-    pendingRevealRef.current = scrollRevealTarget(key) ? null : key;
+    pendingRevealRef.current = scrollRevealTarget(asideRef.current, key) ? null : key;
   }, [props.revealNonce, props.selectedDeviceId]);
 
-  // 补滚：每次渲染后重试未命中的目标（展开后的行、快照迟到的行），命中即清。
+  // 补滚：每次渲染后重试未命中的目标（刚展开的行、快照迟到的行），命中即清。
   useEffect(() => {
     const key = pendingRevealRef.current;
-    if (key && scrollRevealTarget(key)) pendingRevealRef.current = null;
+    if (key && scrollRevealTarget(asideRef.current, key)) pendingRevealRef.current = null;
   });
 
   // A live executor run on one of this workspace's terminals: shown in the icon slot when nothing
