@@ -484,3 +484,21 @@ Out of scope:
   bump `.claude-plugin/plugin.json` then.
 - Rollback: additive on every layer; an older desktop ignores the new summary
   and an older runtime answers the list as unsupported.
+
+## Outcome
+
+- Status: COMPLETE — 2026-11-12
+- Mode: self
+- Commits: `3dac0dbf..e9ded5d2`
+- Deviations:
+  - D6's "first sight of a workspace's list records everything as seen" was not implemented as worded: it would have swallowed the first canvas ever shown in a workspace, because a workspace without canvases sends no summary and so has no earlier "first sight". The desktop instead records when its seen-state was created (`since`) and treats a canvas it never acted on as new only if it was shown after that. The intent of D6 holds (a fresh desktop does not open an account's history; state is local to one desktop). The one comparison across clocks (device `updatedAt` against desktop `since`) only applies to a canvas never seen before.
+  - T8's "the tab says so in words" for an outdated runtime or an unavailable listener is covered by the tab's failure page (a canvas-specific heading and text), not by a separate state per cause. An outdated runtime cannot have canvases at all, so that case is not reachable from a tab.
+  - T4 added tokio's `fs` feature to the runtime; `tests/src/harness.mjs` sets `COFLUX_CANVAS_PORT=0` so parallel stacks do not share the port.
+  - The listener also accepts absolute-form request lines and refuses a non-loopback `Host`; neither was in the brief.
+- Follow-ups:
+  - Slice 2: iOS (list and render, view only).
+  - The desktop UI was not walked through by hand: background tab and unread dot, the 画布 ▸ menu, annotations on a canvas, a remote device.
+  - The canvas port is fixed (8795). A dev runtime and the installed runtime on one machine compete for it; the loser logs it and runs without canvases. Set `COFLUX_CANVAS_PORT` for a dev runtime that needs them.
+  - Unread marks are in memory only; a restart before looking clears them.
+  - Canvas pages enter the built-in browser's history library like any page.
+  - `tests/src/device-harness.mjs` routes `canvasList` to the RPC lane (it is not in its session-payload list); a black-box test of the list needs it added there.
