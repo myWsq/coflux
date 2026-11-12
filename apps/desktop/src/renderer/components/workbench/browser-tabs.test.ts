@@ -78,3 +78,25 @@ test("restore keeps tabs with a record for the same workspace and drops the rest
   const clean = restoreBrowserTabs({ w2: createLayout(["t2"]) }, {});
   assert.deepEqual(layoutTabIds(clean.layouts.w2!), ["t2"]);
 });
+
+test("a canvas tab's record keeps its canvas; a malformed one reads as an ordinary tab", () => {
+  const records = {
+    [A]: { workspaceId: "w1", url: "http://localhost:8795/abc123/home.html", title: "Home", canvas: { id: "abc123", title: "Home redesign" } },
+    [B]: { workspaceId: "w1", url: "http://localhost:5173/", title: "Vite" },
+  };
+  const parsed = parseBrowserTabRecords(serializeBrowserTabRecords(records));
+  assert.deepEqual(parsed, records);
+  assert.equal("canvas" in parsed[B]!, false);
+
+  const raw = JSON.stringify({
+    version: 1,
+    tabs: {
+      [A]: { workspaceId: "w1", url: "http://localhost:8795/x/a.html", title: "", canvas: { id: "../x", title: "t" } },
+      [B]: { workspaceId: "w1", url: "http://localhost:8795/x/b.html", title: "", canvas: "nope" },
+    },
+  });
+  assert.deepEqual(parseBrowserTabRecords(raw), {
+    [A]: { workspaceId: "w1", url: "http://localhost:8795/x/a.html", title: "" },
+    [B]: { workspaceId: "w1", url: "http://localhost:8795/x/b.html", title: "" },
+  });
+});

@@ -446,6 +446,18 @@ export function revealTab(layout: TerminalLayout, taskId: string): TerminalLayou
 }
 
 /**
+ * Adds a tab the user did not ask for (plan 20261112-agent-canvas: an agent showed a canvas) to the
+ * focused group without activating it — it becomes the active tab only of a group that had none,
+ * exactly as a terminal created elsewhere joins a layout in `reconcileLayout`. A tab already in the
+ * layout is left where it is.
+ */
+export function appendBackgroundTab(layout: TerminalLayout, tabId: string): TerminalLayout {
+  if (groupOfTab(layout, tabId)) return layout;
+  const target = focusedGroup(layout);
+  return updateGroup(layout, target.id, (group) => ({ ...group, tabs: [...group.tabs, tabId], activeTabId: group.activeTabId ?? tabId }));
+}
+
+/**
  * Puts a tab that is not in the layout yet right after `anchorId`, in the anchor's group, and makes
  * it that group's active tab with the group focused — a page's `window.open` / `target=_blank`
  * opening a browser tab beside its opener. Without the anchor in the layout it behaves like

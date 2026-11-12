@@ -43,6 +43,11 @@ export const TERMINAL_LAYOUTS_KEY = `coflux_terminal_layouts:${SERVER_URL}`;
  */
 export const BROWSER_TABS_KEY = `coflux_browser_tabs:${SERVER_URL}`;
 /**
+ * What this desktop has already shown of each workspace's canvases (plan 20261112-agent-canvas):
+ * decides which canvases open in a background tab. Scoped by server address like the tab records.
+ */
+export const CANVAS_SEEN_KEY = `coflux_canvas_seen:${SERVER_URL}`;
+/**
  * Open remote screens' records (plan 20261011-standalone-device-screen): at most one per device, its
  * remote session id. Scoped by server address — device ids mean nothing on another server.
  */

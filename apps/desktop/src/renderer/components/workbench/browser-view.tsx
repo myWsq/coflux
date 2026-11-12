@@ -14,6 +14,7 @@ import {
   History,
   LoaderCircle,
   Minus,
+  PanelsTopLeft,
   Plus,
   RefreshCw,
   RotateCw,
@@ -314,6 +315,9 @@ function BrowserView({
   const title = tab?.title ?? "";
   const loading = tab?.loading ?? false;
   const blank = url === "" && failure === null;
+  // A canvas tab (plan 20261112-agent-canvas): the same view, with the agent's title where the
+  // address bar is — its address is the device's business, not something to type over.
+  const canvas = tab?.canvas ?? null;
 
   // ---- browser annotations (plans 20260929-browser-annotations, 20260929-annotation-polish) ----
   const annotationsModel = annotationsModelFor(client);
@@ -872,6 +876,7 @@ function BrowserView({
         },
         focus: () => actionsRef.current.focusPage(),
         reload: () => actionsRef.current.reload(),
+        navigate: (target: string) => actionsRef.current.navigate(target),
       }),
     [runtime, tabId, scope],
   );
@@ -1160,6 +1165,12 @@ function BrowserView({
             <RotateCw className="size-3.5" />
           </ToolbarButton>
         )}
+        {canvas ? (
+          <div className="mx-1 flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-sm">
+            <PanelsTopLeft className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="truncate text-foreground">{canvas.title || "画布"}</span>
+          </div>
+        ) : (
         <div className="relative mx-1 min-w-0 flex-1">
           <input
             ref={addressRef}
@@ -1217,6 +1228,7 @@ function BrowserView({
             </div>
           ) : null}
         </div>
+        )}
         <AnnotateButton
           active={annotating && annotateDisabledReason === null}
           count={annotationCount(annotationSummary, annotations)}
@@ -1320,7 +1332,7 @@ function BrowserView({
           <NewTabPage ports={workspacePorts} recent={library.history.slice(0, NEW_TAB_RECENT_COUNT)} isRemote={isRemote} onOpen={navigate} />
         ) : null}
 
-        {failure ? <FailurePage failure={failure} scopeKind={scope.kind} trusting={trusting} onRetry={retry} onTrust={trustAndRetry} /> : null}
+        {failure ? <FailurePage failure={failure} scopeKind={scope.kind} canvas={canvas !== null} trusting={trusting} onRetry={retry} onTrust={trustAndRetry} /> : null}
 
         {prepareError && !prepared ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-terminal px-6">
@@ -1553,11 +1565,14 @@ function NewTabRow({ icon, primary, secondary, onClick }: { icon: ReactNode; pri
 function FailurePage({
   failure,
   scopeKind,
+  canvas,
   trusting,
   onRetry,
   onTrust,
 }: {
   failure: Failure;
+  /** The tab shows a canvas (plan 20261112-agent-canvas): a refused load means the device's canvas service, not a dev server. */
+  canvas: boolean;
   /** Who a trusted certificate is trusted for: the project (all its worktrees) or the device. */
   scopeKind: DesktopBrowserScope["kind"];
   trusting: boolean;
@@ -1572,6 +1587,10 @@ function FailurePage({
     const port = loopbackPortOf(failure.url);
     heading = `无法连接到 ${host}`;
     body = port !== null ? `这个工作区所在设备的 ${port} 端口上没有程序在监听。启动开发服务器后重试。` : "对方拒绝了连接。";
+    if (canvas) {
+      heading = "无法打开这份画布";
+      body = "这个工作区所在设备的画布服务没有响应。确认设备上的 coflux 在运行后重试。";
+    }
   } else if (failure.kind === "network") {
     body = `${failure.description || "网络错误"}（${failure.code}）`;
   } else if (failure.kind === "tunnel") {
@@ -1579,6 +1598,10 @@ function FailurePage({
     if (failure.reason === "refused") {
       heading = `设备上的 localhost:${port ?? ""} 没有服务在监听`;
       body = "在这个工作区的终端里启动开发服务器后重试。";
+      if (canvas) {
+        heading = "无法打开这份画布";
+        body = "这个工作区所在设备的画布服务没有响应。确认设备上的 coflux 在运行并已更新后重试。";
+      }
     } else if (failure.reason === "unsupported") {
       icon = <Unplug className="size-5" />;
       heading = "该设备的 coflux 版本过旧";

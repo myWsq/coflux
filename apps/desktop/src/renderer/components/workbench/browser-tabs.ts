@@ -19,7 +19,15 @@ export type BrowserTabRecord = {
   url: string;
   /** Last page title seen; empty when there was none. */
   title: string;
+  /**
+   * Set on a canvas tab (plan 20261112-agent-canvas): the canvas it shows and the title the agent
+   * gave it. A canvas tab is a browser tab in every other respect — same layout entry, same view,
+   * same annotations; this only changes its chrome (the title instead of an address bar).
+   */
+  canvas?: BrowserTabCanvas;
 };
+
+export type BrowserTabCanvas = { id: string; title: string };
 
 export type BrowserTabRecords = Readonly<Record<string, BrowserTabRecord>>;
 
@@ -52,6 +60,19 @@ function cleanTitle(value: unknown): string {
   return typeof value === "string" ? value.slice(0, MAX_TITLE_LENGTH) : "";
 }
 
+function cleanCanvas(value: unknown): BrowserTabCanvas | undefined {
+  if (!isRecord(value) || typeof value.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value.id)) return undefined;
+  return { id: value.id, title: cleanTitle(value.title) };
+}
+
+/** A record as it is stored: the canvas key is present only on a canvas tab. */
+function cleanRecord(workspaceId: string, value: { url?: unknown; title?: unknown; canvas?: unknown }): BrowserTabRecord {
+  const record: BrowserTabRecord = { workspaceId, url: cleanUrl(value.url), title: cleanTitle(value.title) };
+  const canvas = cleanCanvas(value.canvas);
+  if (canvas) record.canvas = canvas;
+  return record;
+}
+
 /** Parses a stored value; anything unusable reads as "nothing stored", a bad entry is skipped. */
 export function parseBrowserTabRecords(raw: string | null): Record<string, BrowserTabRecord> {
   if (!raw) return {};
@@ -68,7 +89,7 @@ export function parseBrowserTabRecords(raw: string | null): Record<string, Brows
     if (count >= MAX_RECORDS) break;
     if (!id.startsWith(BROWSER_TAB_PREFIX) || id.length > 128 || !isRecord(value)) continue;
     if (typeof value.workspaceId !== "string" || value.workspaceId.length === 0) continue;
-    records[id] = { workspaceId: value.workspaceId, url: cleanUrl(value.url), title: cleanTitle(value.title) };
+    records[id] = cleanRecord(value.workspaceId, value);
     count += 1;
   }
   return records;
@@ -78,7 +99,7 @@ export function serializeBrowserTabRecords(records: BrowserTabRecords): string {
   const tabs: Record<string, BrowserTabRecord> = {};
   for (const id of Object.keys(records).sort()) {
     const record = records[id]!;
-    tabs[id] = { workspaceId: record.workspaceId, url: cleanUrl(record.url), title: cleanTitle(record.title) };
+    tabs[id] = cleanRecord(record.workspaceId, record);
   }
   return JSON.stringify({ version: STORAGE_VERSION, tabs });
 }

@@ -48,6 +48,8 @@ import { useDesktopDaemonState } from "@/components/workbench/use-desktop-daemon
 import { useExecutorBridge } from "@/components/workbench/use-executor-bridge";
 import { BrowserViews, type BrowserViewEntry } from "@/components/workbench/browser-view";
 import { createBrowserRuntime } from "@/components/workbench/browser-runtime";
+import { createCanvasRuntime } from "@/components/workbench/canvas-runtime";
+import type { CanvasSeenStore } from "@/components/workbench/canvas-seen";
 import { browserScopeOfWorkspace } from "../../../shared/browser-partitions";
 import { createBrowserTabId, readBrowserTabRecords, restoreBrowserTabs, type BrowserTabStore } from "@/components/workbench/browser-tabs";
 import type { BrowserLibraryStore } from "@/components/workbench/browser-library";
@@ -66,6 +68,7 @@ import {
   EMPTY_LAYOUT,
   PENDING_TAB_PREFIX,
   activeTabIds,
+  appendBackgroundTab,
   beginPendingTab,
   dropPendingTab,
   effectiveLayout,
@@ -106,6 +109,7 @@ import {
 import {
   BROWSER_LIBRARY_KEY,
   BROWSER_TABS_KEY,
+  CANVAS_SEEN_KEY,
   COMMAND_PALETTE_RECENT_KEY,
   DAEMON_ONBOARDING_DISMISSED_KEY,
   FILE_TABS_KEY,
@@ -117,7 +121,7 @@ import {
 } from "@/config";
 import type { DesktopBridge } from "@/desktop-bridge";
 import { cn } from "@/lib/utils";
-import { isDirWorkspace, isProjectArchived, isWorkspaceArchived, type CofluxClient, type CofluxState } from "@coflux/client";
+import { isDirWorkspace, isProjectArchived, isWorkspaceArchived, type CanvasEntry, type CofluxClient, type CofluxState } from "@coflux/client";
 
 // 终端栈（xterm + WorkspaceTerminal/TerminalPanes）懒加载，不进首屏主 chunk：
 // 登录页与"未选中工作区"的空状态都不需要它。module 级别声明，保证只 lazy() 一次，
@@ -184,6 +188,8 @@ const TERMINAL_LAYOUT_STORE: TerminalLayoutStore = { storage: localStorage, key:
  */
 const BROWSER_TAB_STORE: BrowserTabStore = { storage: localStorage, key: BROWSER_TABS_KEY };
 const BROWSER_LIBRARY_STORE: BrowserLibraryStore = { storage: localStorage, key: BROWSER_LIBRARY_KEY };
+/** What this desktop has already shown of each workspace's canvases (plan 20261112-agent-canvas). */
+const CANVAS_SEEN_STORE: CanvasSeenStore = { storage: localStorage, key: CANVAS_SEEN_KEY };
 /** Open remote screens' records (plan 20261011-standalone-device-screen): one per device, its remote session id. */
 const SCREEN_RECORD_STORE: ScreenRecordStore = { storage: localStorage, key: SCREENS_KEY };
 /** File tabs' records (plan 20261001-terminal-file-tab): workspace, canonical path and line per tab. */
@@ -414,7 +420,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const activeTerminalRef = useRef<WorkspaceTerminalHandle | null>(null);
   const [notificationOpen, setNotificationOpen] = useState(false);
   // The ＋ menu that is open (a group's tab strip), whether a click or ⌘T opened it.
-  const [newTabMenu, setNewTabMenu] = useState<{ workspaceId: string; groupId: string } | null>(null);
+  // `openedAt`: when it opened, read in the handler that opened it — the menu's 画布 ▸ ages are as of then.
+  const [newTabMenu, setNewTabMenu] = useState<{ workspaceId: string; groupId: string; openedAt: number } | null>(null);
   // The selected workspace as of the last commit, or as the store subscription has just moved it:
   // handlers, the store subscription and the attach gate read it synchronously.
   const activeWorkspaceIdRef = useRef<string | null>(null);
@@ -468,6 +475,8 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [browser] = useState(() =>
     createBrowserRuntime({ desktop, tabStore: BROWSER_TAB_STORE, libraryStore: BROWSER_LIBRARY_STORE, initialRecords: initialState.records }),
   );
+  // Canvases (plan 20261112-agent-canvas): each workspace's list and which ones are unread here.
+  const [canvases] = useState(() => createCanvasRuntime({ client, seenStore: CANVAS_SEEN_STORE }));
   const lastWrittenLayoutsRef = useRef<string | null>(null);
   // Debounced persisting (see flushLayoutPersist): the layouts object last looked at, the pending
   // write, and whether a sash drag is in progress.
@@ -765,6 +774,68 @@ export function Workbench({ client }: { client: CofluxClient }) {
     if (workspaceId === activeWorkspaceIdRef.current) browser.focus(tabId);
   }
 
+  /** A URL's origin, or "" for anything that is not a URL (a blank tab). */
+  function originOf(url: string): string {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return "";
+    }
+  }
+
+  /** The open tab of a canvas in a workspace, if its layout still holds one. */
+  function canvasTabOf(workspaceId: string, canvasId: string): string | null {
+    const layout = layoutOf(workspaceId);
+    for (const [tabId, view] of Object.entries(browser.tabs.getState().tabs)) {
+      if (view.workspaceId === workspaceId && view.canvas?.id === canvasId && groupOfTab(layout, tabId)) return tabId;
+    }
+    return null;
+  }
+
+  /** Whether a tab is what the user is looking at: its group's active tab in the selected workspace, changes overlay closed. */
+  function tabOnScreen(workspaceId: string, tabId: string): boolean {
+    if (workspaceId !== activeWorkspaceIdRef.current || changesOpenRef.current[workspaceId]) return false;
+    return groupOfTab(layoutOf(workspaceId), tabId)?.activeTabId === tabId;
+  }
+
+  /**
+   * An agent showed a canvas, or showed one again (plan 20261112-agent-canvas). Never a user action:
+   * a new canvas joins the focused group without becoming its active tab and without taking the
+   * caret; a canvas that already has a tab is loaded again at its own address. The unread mark the
+   * runtime set stays until the tab is on screen — which it already is when the user is looking at it.
+   */
+  function showCanvasInBackground(workspaceId: string, canvas: CanvasEntry) {
+    if (!client.store.getState().workspaces.some((workspace) => workspace.id === workspaceId)) return;
+    const existing = canvasTabOf(workspaceId, canvas.id);
+    if (existing) {
+      browser.updateTab(existing, { canvas: { id: canvas.id, title: canvas.title } });
+      browser.navigate(existing, canvas.url);
+      if (tabOnScreen(workspaceId, existing)) canvases.markRead(canvas.id);
+      return;
+    }
+    const tabId = createBrowserTabId(crypto.randomUUID());
+    browser.createTab(tabId, workspaceId, canvas.url, { id: canvas.id, title: canvas.title });
+    commitLayout(workspaceId, appendBackgroundTab(layoutOf(workspaceId), tabId));
+    if (tabOnScreen(workspaceId, tabId)) canvases.markRead(canvas.id);
+  }
+
+  /** ＋ menu's 画布 ▸ item: the canvas's tab is activated where it is, or opened in that group. */
+  function openCanvasTab(workspaceId: string, groupId: string, canvas: CanvasEntry) {
+    const existing = canvasTabOf(workspaceId, canvas.id);
+    if (existing) {
+      // The device serves it somewhere else now (its canvas port changed): the old address is dead.
+      const current = browser.tabs.getState().tabs[existing]?.url ?? "";
+      if (originOf(current) !== originOf(canvas.url)) browser.navigate(existing, canvas.url);
+      activateTaskByUser(workspaceId, existing);
+      return;
+    }
+    setWorkspaceChangesOpen(workspaceId, false);
+    const tabId = createBrowserTabId(crypto.randomUUID());
+    browser.createTab(tabId, workspaceId, canvas.url, { id: canvas.id, title: canvas.title });
+    commitLayout(workspaceId, revealTab(focusGroup(layoutOf(workspaceId), groupId), tabId));
+    if (workspaceId === activeWorkspaceIdRef.current) browser.focus(tabId);
+  }
+
   /** Closing a browser tab just removes it — no confirmation, nothing to stop. The caret goes to the tab that takes its place. */
   function closeBrowserTab(workspaceId: string, tabId: string) {
     commitLayout(workspaceId, removeTab(layoutOf(workspaceId), tabId));
@@ -946,6 +1017,16 @@ export function Workbench({ client }: { client: CofluxClient }) {
     });
     return browser.start();
   }, [browser]);
+  // Canvases (plan 20261112-agent-canvas): the runtime reports each canvas that is new to this desktop.
+  const onCanvasShown = useEffectEvent((workspaceId: string, canvas: CanvasEntry) => showCanvasInBackground(workspaceId, canvas));
+  useEffect(() => {
+    canvases.setHandler((workspaceId, canvas) => onCanvasShown(workspaceId, canvas));
+    const stop = canvases.start();
+    return () => {
+      stop();
+      canvases.setHandler(null);
+    };
+  }, [canvases]);
 
   /**
    * A terminal moved to another workspace (plan 104): when it is the one the user is watching (the
@@ -1463,6 +1544,20 @@ export function Workbench({ client }: { client: CofluxClient }) {
     }
   }
   browserEntries.sort((left, right) => (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0));
+  // Canvases (plan 20261112-agent-canvas): a canvas tab that is on screen has been seen, and the
+  // selected workspace's list is loaded for its ＋ menu. Keyed by what is visible, not by render.
+  const visibleBrowserTabs = browserEntries.filter((entry) => entry.visible).map((entry) => entry.tabId).join(" ");
+  const activeCanvasRevision = useStore(client.store, (state) => (activeWorkspaceId ? state.canvasSummaries[activeWorkspaceId]?.revision : undefined));
+  useEffect(() => {
+    const tabs = browser.tabs.getState().tabs;
+    for (const tabId of visibleBrowserTabs ? visibleBrowserTabs.split(" ") : []) {
+      const canvasId = tabs[tabId]?.canvas?.id;
+      if (canvasId) canvases.markRead(canvasId);
+    }
+  }, [browser, canvases, visibleBrowserTabs]);
+  useEffect(() => {
+    if (activeWorkspaceId && activeCanvasRevision !== undefined) canvases.ensure(activeWorkspaceId);
+  }, [canvases, activeWorkspaceId, activeCanvasRevision]);
   // Screen views (plan 20261011-standalone-device-screen): one per open screen, sorted by device id so
   // the relative order of mounted views never changes and React never moves a view's DOM node; the
   // selected one is visible.
@@ -1644,7 +1739,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
         }
         // The changes overlay covers the tab strip the menu hangs from.
         setWorkspaceChangesOpen(workspaceId, false);
-        setNewTabMenu({ workspaceId, groupId: focusedGroup(layoutOf(workspaceId)).id });
+        setNewTabMenu({ workspaceId, groupId: focusedGroup(layoutOf(workspaceId)).id, openedAt: Date.now() });
       },
       createTerminal: () => createTerminalIn(workspaceId, null),
       closeActiveTab: () => {
@@ -1715,9 +1810,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
     },
     closeBrowserTab,
     reloadBrowserTab: (tabId) => browser.reload(tabId),
+    openCanvasTab,
     closeFileTab,
     openFileTab,
-    setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId } : null),
+    setNewTabMenu: (workspaceId, groupId) => setNewTabMenu(groupId ? { workspaceId, groupId, openedAt: Date.now() } : null),
     focusActiveTab: (workspaceId) => {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
       const focused = currentScreen().focused ?? focusedBrowserTabId();
@@ -1887,8 +1983,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
                     leftDockReserve={reservedLeft}
                     actions={workspaceActions}
                     browser={browser}
+                    canvases={canvases}
                     files={files}
                     newTabMenuGroupId={isActive && newTabMenu?.workspaceId === workspace.id ? newTabMenu.groupId : null}
+                    newTabMenuOpenedAt={newTabMenu?.openedAt ?? 0}
                     agentTabs={agentLaunches.records}
                     fileReveal={fileReveals[workspace.id] ?? null}
                   />

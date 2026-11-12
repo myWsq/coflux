@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
+import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, PanelsTopLeft, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -16,7 +16,7 @@ import { executorTaskIds as executorTaskIdsOf } from "@/components/workbench/exe
 import { ActivityDots } from "@/components/workbench/pending-dots";
 import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifier";
 import { ClaudeTabCard } from "@/components/workbench/terminal-recap-card";
-import { isDirWorkspace as isDirWorkspaceOf, type CofluxClient } from "@coflux/client";
+import { isDirWorkspace as isDirWorkspaceOf, type CanvasEntry, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
 import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
 import { AgentLogo, CodexLogo } from "@/components/settings/agent-logos";
@@ -24,6 +24,8 @@ import { effectiveAgents, type AgentId, type EffectiveAgent } from "@/components
 import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
 import type { BrowserRuntime } from "@/components/workbench/browser-runtime";
+import type { CanvasRuntime } from "@/components/workbench/canvas-runtime";
+import { formatRecapAge } from "@/components/workbench/terminal-recap";
 import type { FileRuntime } from "@/components/workbench/file-runtime";
 import { fileTabTitle } from "@/components/workbench/file-tabs";
 import { FileView } from "@/components/workbench/file-view";
@@ -177,6 +179,8 @@ export type WorkspaceLayoutActions = {
   /** A browser tab's close button / context menu: removes the tab, no confirmation (plan 20260924-desktop-browser-tab). */
   closeBrowserTab: (workspaceId: string, tabId: string) => void;
   reloadBrowserTab: (tabId: string) => void;
+  /** ＋ menu's 画布 ▸ (plan 20261112-agent-canvas): activates the canvas's tab, or opens it in that group. */
+  openCanvasTab: (workspaceId: string, groupId: string, canvas: CanvasEntry) => void;
   /** A file tab's close button / context menu (plan 20261001-terminal-file-tab): removes the tab, no confirmation. */
   closeFileTab: (workspaceId: string, tabId: string) => void;
   /** 「在标签页中打开」 in the files overlay (plan 20261002-workspace-files-view): opens or focuses the file's tab. */
@@ -205,15 +209,24 @@ type WorkspaceTerminalProps = {
   actions: WorkspaceLayoutActions;
   /** Built-in browser tabs' titles, favicons and loading state for their strip chips. */
   browser: BrowserRuntime;
+  /** Canvases (plan 20261112-agent-canvas): this workspace's list for the ＋ menu, and the unread marks. */
+  canvases: CanvasRuntime;
   /** File tabs' records and views (plan 20261001-terminal-file-tab). */
   files: FileRuntime;
   /** The group whose ＋ menu is open, if it is in this workspace. */
   newTabMenuGroupId: string | null;
+  /** When that menu was opened (Unix ms); 0 when none is open. */
+  newTabMenuOpenedAt: number;
   /** Terminal tabs opened as an agent (task id → agent id): their brand logo when no agent is detected. */
   agentTabs: Readonly<Record<string, AgentId>>;
   /** The latest file the workbench asked the files overlay to reveal in this workspace (plan 20261002-workspace-files-view). */
   fileReveal: FileReveal | null;
 };
+
+/** A stable empty list for a workspace without canvases (a selector must not return a fresh array). */
+const NO_CANVASES: readonly CanvasEntry[] = [];
+/** 画布 ▸ lists the most recently shown ones; a menu is not the place for a workspace's whole history. */
+const MAX_MENU_CANVASES = 20;
 
 /**
  * The tab strip's ＋: a menu of what to open in this group — a terminal or a blank browser tab
@@ -234,9 +247,12 @@ function NewTabMenu({
   busy,
   spinning,
   agents,
+  canvases,
+  openedAt,
   onTerminal,
   onAgent,
   onBrowser,
+  onCanvas,
   onRestoreFocus,
 }: {
   open: boolean;
@@ -245,9 +261,14 @@ function NewTabMenu({
   spinning: boolean;
   /** The account's effective agents in catalog order (plan 20261002-account-agent-settings). */
   agents: readonly EffectiveAgent[];
+  /** The workspace's canvases, most recently shown first (plan 20261112-agent-canvas); none = no 画布 ▸. */
+  canvases: readonly CanvasEntry[];
+  /** When the menu was opened: the ages in 画布 ▸ are as of then. */
+  openedAt: number;
   onTerminal: () => void;
   onAgent: (agentId: AgentId) => void;
   onBrowser: () => void;
+  onCanvas: (canvas: CanvasEntry) => void;
   onRestoreFocus: () => void;
 }) {
   const anchorRef = useRef<HTMLButtonElement | null>(null);
@@ -333,6 +354,18 @@ function NewTabMenu({
           </DropdownMenuSubMenu>
         ) : null}
         <DropdownMenuItem icon={<Globe className="size-3.5" />} label="浏览器" onClick={onBrowser} />
+        {canvases.length > 0 ? (
+          <DropdownMenuSubMenu icon={<PanelsTopLeft className="size-3.5" />} label="画布">
+            {canvases.slice(0, MAX_MENU_CANVASES).map((canvas) => (
+              <DropdownMenuItem
+                key={canvas.id}
+                label={canvas.title}
+                description={formatRecapAge(openedAt, canvas.updatedAt)}
+                onClick={() => onCanvas(canvas)}
+              />
+            ))}
+          </DropdownMenuSubMenu>
+        ) : null}
       </DropdownMenu>
       <Tooltip anchorRef={anchorRef} isEnabled={!open && !tooltipQuiet} isOpen={open ? false : undefined} content="新建标签页" />
     </>
@@ -532,8 +565,10 @@ export function WorkspaceTerminal({
   leftDockReserve,
   actions,
   browser,
+  canvases,
   files,
   newTabMenuGroupId,
+  newTabMenuOpenedAt,
   agentTabs,
   fileReveal,
 }: WorkspaceTerminalProps) {
@@ -556,6 +591,8 @@ export function WorkspaceTerminal({
   const effectiveAgentList = useMemo(() => effectiveAgents(agentSettings), [agentSettings]);
   const modPrefix = SHORTCUT_MODIFIER_PREFIX;
   const browserTabs = useStore(browser.tabs, (state) => state.tabs);
+  const canvasList = useStore(canvases.state, (state) => state.workspaces[workspaceId]?.canvases) ?? NO_CANVASES;
+  const canvasUnread = useStore(canvases.state, (state) => state.unread);
   const fileTabs = useStore(files.tabs, (state) => state.tabs);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
@@ -785,7 +822,10 @@ export function WorkspaceTerminal({
   ) {
     const view = browserTabs[tabId];
     const url = view?.url ?? "";
-    const label = view?.title || (url ? hostLabel(url) : "新标签页");
+    // A canvas tab (plan 20261112-agent-canvas) is named by the agent, not by the page.
+    const canvas = view?.canvas ?? null;
+    const label = canvas ? canvas.title || "画布" : view?.title || (url ? hostLabel(url) : "新标签页");
+    const unread = Boolean(canvas && canvasUnread[canvas.id]);
     const canSplit = group.tabs.length > 1;
     return (
       <div
@@ -819,13 +859,18 @@ export function WorkspaceTerminal({
           <div className={cn("group flex h-7 max-w-52 items-center rounded-md text-sm transition-colors", isActive ? activeClass : idleClass)}>
             <button className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch px-2.5 text-left" onClick={() => actions.activateTab(workspaceId, tabId)}>
               <BrowserTabGlyph favicon={view?.favicon ?? null} loading={view?.loading ?? false} className={bright ? "opacity-90" : "opacity-70"} />
-              {url && view?.title ? (
+              {canvas ? (
+                <Tooltip content={unread ? `画布「${label}」有更新` : `画布「${label}」`} placement="below">
+                  <span className="truncate">{label}</span>
+                </Tooltip>
+              ) : url && view?.title ? (
                 <Tooltip content={`${view.title} · ${url}`} placement="below">
                   <span className="truncate">{label}</span>
                 </Tooltip>
               ) : (
                 <span className="truncate">{label}</span>
               )}
+              {unread ? <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" /> : null}
             </button>
             {/* ⌘W closes the focused group's active tab only, so only that tab advertises it. */}
             <Tooltip content={bright ? `关闭标签页 ${modPrefix}W` : "关闭标签页"} placement="below">
@@ -1162,9 +1207,12 @@ export function WorkspaceTerminal({
               busy={Boolean(pending)}
               spinning={holdsPending}
               agents={effectiveAgentList}
+              canvases={canvasList}
+              openedAt={newTabMenuOpenedAt}
               onTerminal={() => actions.createTerminal(workspaceId, group.id)}
               onAgent={(agentId) => actions.createAgentTerminal(workspaceId, group.id, agentId)}
               onBrowser={() => actions.createBrowserTab(workspaceId, group.id)}
+              onCanvas={(canvas) => actions.openCanvasTab(workspaceId, group.id, canvas)}
               onRestoreFocus={() => actions.focusActiveTab(workspaceId)}
             />
           </div>
