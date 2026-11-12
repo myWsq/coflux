@@ -13,6 +13,7 @@ mod agent_ctl;
 mod agent_socket;
 mod agents;
 mod annotations;
+mod canvas;
 mod atomic_file;
 mod changes;
 mod conn_state;
@@ -850,6 +851,15 @@ async fn runtime_main(home: String, sessions: Arc<Sessions>) {
             ));
         }
         Err(error) => logln!("[worker] local sockets disabled: {error}"),
+    }
+
+    // The canvas listener (plan 20261112-agent-canvas): a loopback port of its own, independent of
+    // the gateway and of the center. A port it cannot bind only disables canvases.
+    if let Some(canvases) = device.canvases().cloned() {
+        tokio::spawn(canvas::serve(
+            env_u16("COFLUX_CANVAS_PORT", coflux_protocol::CANVAS_PORT),
+            canvases,
+        ));
     }
 
     // gateway 监听独立于中心 server_loop；热升级时旧 worker 短暂占端口会在后台重试。
@@ -1753,6 +1763,10 @@ async fn run_server_connection(
                     // So is the annotation summary (plan 20260929-browser-annotations).
                     if let Some(annotations) = device.annotations() {
                         annotations.publish();
+                    }
+                    // And the canvas summary (plan 20261112-agent-canvas).
+                    if let Some(canvases) = device.canvases() {
+                        canvases.publish();
                     }
                 }
             }

@@ -63,6 +63,10 @@ pub const DEVICE_PROTOCOL_VERSION: u32 = 1;
 pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 /// 本机 gateway 的生产固定端口；dev/test 可经 worker 配置覆盖。
 pub const LOCAL_GATEWAY_PORT: u16 = 8788;
+/// The runtime's canvas listener (plan 20261112-agent-canvas): a fixed loopback port of its own, so
+/// a canvas keeps one origin across restarts (annotations are matched by it) and never shares one
+/// with the gateway. `COFLUX_CANVAS_PORT` overrides it; 0 asks the OS for a port.
+pub const CANVAS_PORT: u16 = 8795;
 /// PTY 创建/resize 的共享尺寸边界；TS `clampDim` 使用同值。
 pub const MIN_TERMINAL_DIMENSION: u16 = 1;
 pub const MAX_TERMINAL_DIMENSION: u16 = 1000;
