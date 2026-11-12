@@ -118,6 +118,15 @@ message AnnotationsSummary {
   repeated WorkspaceAnnotationSummary workspaces = 1;
 }
 
+// Full idempotent snapshot of this daemon's canvases per workspace (plan 20261112-agent-canvas),
+// same shape as AnnotationsSummary: sent on every change and unconditionally after authentication;
+// only workspaces that have a canvas are listed, empty = none. Revision only. The server validates
+// each workspace against its catalog (it must belong to this daemon), keeps the result in memory
+// only and fans it out to the account's clients.
+message CanvasSummary {
+  repeated WorkspaceCanvasSummary workspaces = 1;
+}
+
 // Full idempotent snapshot of this daemon's live executor runs (plan 20260929-executor-pip), same
 // shape as SecretRequests: sent on every change of the ledger (including a sweep that turned a run
 // unknown) and unconditionally after authentication; empty = none running. The server validates
@@ -354,6 +363,7 @@ message DaemonToServer {
     ExecutorRuns executor_runs = 41;
     // Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
     SessionMetadata session_metadata = 42;
+    CanvasSummary canvas_summary = 43;
   }
 }
 

@@ -339,6 +339,15 @@ message AnnotationsSummaryUpdated {
   repeated WorkspaceAnnotationSummary workspaces = 2;
 }
 
+// A device's canvas summaries (plan 20261112-agent-canvas): the full current set, broadcast after
+// each daemon CanvasSummary report or when the daemon disconnects (empty), and re-sent per device
+// on subscribe. Revision only; a desktop refetches the list over the Device channel when a
+// revision changes. In-memory derived fact, never persisted.
+message CanvasSummaryUpdated {
+  string daemon_id = 1;
+  repeated WorkspaceCanvasSummary workspaces = 2;
+}
+
 // A device's live executor runs (plan 20260929-executor-pip): the full current set, broadcast after
 // each daemon ExecutorRuns report or when the daemon disconnects (empty), and re-sent per device on
 // subscribe. Drives the picture-in-picture card on the caller terminal's pane on every desktop and
@@ -482,6 +491,7 @@ message ServerToClient {
     SpeechConfigStatus speech_config_status = 53;
     SpeechCredentials speech_credentials = 54;
     SpeechRefineCredentials speech_refine_credentials = 55;
+    CanvasSummaryUpdated canvas_summary_updated = 56;
   }
 }
 

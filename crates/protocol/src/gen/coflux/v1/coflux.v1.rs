@@ -388,6 +388,17 @@ pub struct WorkspaceAnnotationSummary {
     #[prost(uint32, tag="4")]
     pub resolved: u32,
 }
+/// One workspace's canvases as the center may know them (plan 20261112-agent-canvas): a revision
+/// that changes whenever an agent shows or re-shows a canvas in the workspace. Nothing else — no
+/// title, no path: a desktop showing the workspace refetches the list over the Device channel when
+/// the revision changes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WorkspaceCanvasSummary {
+    #[prost(string, tag="1")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub revision: u32,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum TaskStatus {
@@ -2097,6 +2108,58 @@ pub struct DeviceAnnotationsListed {
     #[prost(bool, tag="6")]
     pub code_comments: bool,
 }
+// ===== Canvases (plan 20261112-agent-canvas) =====
+//
+// A canvas is an HTML file an agent showed with `coflux canvas show`. The worker keeps a
+// per-workspace registry and serves each canvas's directory on a dedicated loopback HTTP listener;
+// a desktop loads `<http://localhost:<port>/<id>/<file_name>`> in a browser tab (reaching a remote
+// device through the loopback tunnel). The list requires DEVICE_SCOPE_SESSION_CONTROL like
+// annotations, so a local workspace's canvases keep working while the center is unreachable. A
+// worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients treat exactly that as "the device's
+// worker does not support canvases".
+
+/// One canvas. The file's absolute path never leaves the device.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Canvas {
+    /// Unguessable; stable for the same file in the same workspace.
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+    /// The HTML file's name inside the served directory.
+    #[prost(string, tag="3")]
+    pub file_name: ::prost::alloc::string::String,
+    /// When the agent last showed it, Unix milliseconds.
+    #[prost(uint64, tag="4")]
+    pub updated_at_ms: u64,
+}
+/// client→worker (SESSION_CONTROL): the workspace's canvases whose file still exists.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeviceCanvasList {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+}
+/// worker→client (SESSION_CONTROL).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceCanvasListed {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub ok: bool,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub revision: u32,
+    /// The loopback port of the worker's canvas listener; 0 = the listener is not running (the port
+    /// was taken), so no canvas can be loaded.
+    #[prost(uint32, tag="5")]
+    pub port: u32,
+    #[prost(message, repeated, tag="6")]
+    pub canvases: ::prost::alloc::vec::Vec<Canvas>,
+}
 /// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DeviceAnnotationsMutate {
@@ -2651,7 +2714,7 @@ pub struct DeviceEnvelope {
     /// 与中心 prepared template 尚未绑定 channel 时必须为空。
     #[prost(string, tag="2")]
     pub channel_id: ::prost::alloc::string::String,
-    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147")]
+    #[prost(oneof="device_envelope::Payload", tags="10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 60, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 85, 90, 91, 100, 101, 102, 103, 110, 111, 112, 113, 114, 115, 116, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149")]
     pub payload: ::core::option::Option<device_envelope::Payload>,
 }
 /// Nested message and enum types in `DeviceEnvelope`.
@@ -2842,6 +2905,10 @@ pub mod device_envelope {
         FsIndex(super::DeviceFsIndex),
         #[prost(message, tag="147")]
         FsIndexResult(super::DeviceFsIndexResult),
+        #[prost(message, tag="148")]
+        CanvasList(super::DeviceCanvasList),
+        #[prost(message, tag="149")]
+        CanvasListed(super::DeviceCanvasListed),
     }
 }
 // Device 协议版本、默认 loopback 端口与 terminal dimension 边界同时在 TS/Rust 薄封装导出
@@ -4130,6 +4197,17 @@ pub struct AnnotationsSummaryUpdated {
     #[prost(message, repeated, tag="2")]
     pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
 }
+/// A device's canvas summaries (plan 20261112-agent-canvas): the full current set, broadcast after
+/// each daemon CanvasSummary report or when the daemon disconnects (empty), and re-sent per device
+/// on subscribe. Revision only; a desktop refetches the list over the Device channel when a
+/// revision changes. In-memory derived fact, never persisted.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CanvasSummaryUpdated {
+    #[prost(string, tag="1")]
+    pub daemon_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub workspaces: ::prost::alloc::vec::Vec<WorkspaceCanvasSummary>,
+}
 /// A device's live executor runs (plan 20260929-executor-pip): the full current set, broadcast after
 /// each daemon ExecutorRuns report or when the daemon disconnects (empty), and re-sent per device on
 /// subscribe. Drives the picture-in-picture card on the caller terminal's pane on every desktop and
@@ -4255,7 +4333,7 @@ pub struct TaskReadResult {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClient {
-    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55")]
+    #[prost(oneof="server_to_client::Payload", tags="1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 30, 31, 32, 34, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56")]
     pub payload: ::core::option::Option<server_to_client::Payload>,
 }
 /// Nested message and enum types in `ServerToClient`.
@@ -4346,6 +4424,8 @@ pub mod server_to_client {
         SpeechCredentials(super::SpeechCredentials),
         #[prost(message, tag="55")]
         SpeechRefineCredentials(super::SpeechRefineCredentials),
+        #[prost(message, tag="56")]
+        CanvasSummaryUpdated(super::CanvasSummaryUpdated),
     }
 }
 /// Mint a one-time device join key for the signed-in account (plan 20260924-device-join-keys).
@@ -4853,6 +4933,16 @@ pub struct AnnotationsSummary {
     #[prost(message, repeated, tag="1")]
     pub workspaces: ::prost::alloc::vec::Vec<WorkspaceAnnotationSummary>,
 }
+/// Full idempotent snapshot of this daemon's canvases per workspace (plan 20261112-agent-canvas),
+/// same shape as AnnotationsSummary: sent on every change and unconditionally after authentication;
+/// only workspaces that have a canvas are listed, empty = none. Revision only. The server validates
+/// each workspace against its catalog (it must belong to this daemon), keeps the result in memory
+/// only and fans it out to the account's clients.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CanvasSummary {
+    #[prost(message, repeated, tag="1")]
+    pub workspaces: ::prost::alloc::vec::Vec<WorkspaceCanvasSummary>,
+}
 /// Full idempotent snapshot of this daemon's live executor runs (plan 20260929-executor-pip), same
 /// shape as SecretRequests: sent on every change of the ledger (including a sweep that turned a run
 /// unknown) and unconditionally after authentication; empty = none running. The server validates
@@ -5125,7 +5215,7 @@ pub struct ProxyClosed {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DaemonToServer {
-    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41, 42")]
+    #[prost(oneof="daemon_to_server::Payload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 18, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43")]
     pub payload: ::core::option::Option<daemon_to_server::Payload>,
 }
 /// Nested message and enum types in `DaemonToServer`.
@@ -5196,6 +5286,8 @@ pub mod daemon_to_server {
         /// Title and command state of a live session, sent on change (plan 20261010-terminal-checkpoint-energy).
         #[prost(message, tag="42")]
         SessionMetadata(super::SessionMetadata),
+        #[prost(message, tag="43")]
+        CanvasSummary(super::CanvasSummary),
     }
 }
 // ===== 中心发起的终端读/写（plan 091）=====

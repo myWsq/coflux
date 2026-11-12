@@ -308,3 +308,12 @@ message WorkspaceAnnotationSummary {
   uint32 pending = 3;
   uint32 resolved = 4;
 }
+
+// One workspace's canvases as the center may know them (plan 20261112-agent-canvas): a revision
+// that changes whenever an agent shows or re-shows a canvas in the workspace. Nothing else — no
+// title, no path: a desktop showing the workspace refetches the list over the Device channel when
+// the revision changes.
+message WorkspaceCanvasSummary {
+  string workspace_id = 1;
+  uint32 revision = 2;
+}
