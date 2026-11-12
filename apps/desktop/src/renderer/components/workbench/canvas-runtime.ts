@@ -95,7 +95,12 @@ export function createCanvasRuntime(options: { client: CofluxClient; seenStore: 
   }
 
   function sync() {
-    for (const [workspaceId, summary] of Object.entries(client.store.getState().canvasSummaries)) {
+    const current = client.store.getState();
+    const known = new Set(current.workspaces.map((workspace) => workspace.id));
+    for (const [workspaceId, summary] of Object.entries(current.canvasSummaries)) {
+      // A summary can arrive before the snapshot that names its workspace; it is looked at again
+      // when the workspace list changes (see `start`).
+      if (!known.has(workspaceId)) continue;
       const resent = lastSummary.get(workspaceId) !== summary;
       lastSummary.set(workspaceId, summary);
       if (attempted.get(workspaceId) === summary.revision) {
@@ -134,11 +139,13 @@ export function createCanvasRuntime(options: { client: CofluxClient; seenStore: 
       handler = next;
     },
     start() {
-      let last = client.store.getState().canvasSummaries;
+      let lastSummaries = client.store.getState().canvasSummaries;
+      let lastWorkspaces = client.store.getState().workspaces;
       sync();
       return client.store.subscribe((current) => {
-        if (current.canvasSummaries === last) return;
-        last = current.canvasSummaries;
+        if (current.canvasSummaries === lastSummaries && current.workspaces === lastWorkspaces) return;
+        lastSummaries = current.canvasSummaries;
+        lastWorkspaces = current.workspaces;
         sync();
       });
     },

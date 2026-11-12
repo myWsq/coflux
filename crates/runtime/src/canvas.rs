@@ -432,6 +432,11 @@ fn content_type_for(path: &Path) -> &'static str {
 
 /// Maps a request target (`/<id>/<path>?query`) to a file inside the canvas's directory.
 fn resolve(store: &CanvasStore, target: &str) -> Resolved {
+    // Origin form normally; a client talking through a proxy may send the absolute form.
+    let target = match target.strip_prefix("http://") {
+        Some(rest) => rest.find('/').map_or("/", |start| &rest[start..]),
+        None => target,
+    };
     let path = target.split(['?', '#']).next().unwrap_or_default();
     let Some(rest) = path.strip_prefix('/') else {
         return Resolved::NotFound;
@@ -763,6 +768,11 @@ mod tests {
             resolve(&f.store, &format!("/{id}/img/a%20b.png")),
             Resolved::File { path: root.join("img/a b.png"), content_type: "image/png" }
         );
+        assert_eq!(
+            resolve(&f.store, &format!("http://localhost:8795/{id}/style.css")),
+            Resolved::File { path: root.join("style.css"), content_type: "text/css; charset=utf-8" }
+        );
+        assert_eq!(resolve(&f.store, "http://localhost:8795"), Resolved::NotFound);
         assert_eq!(resolve(&f.store, &format!("/{id}")), Resolved::Redirect(format!("/{id}/index.html")));
         assert_eq!(resolve(&f.store, &format!("/{id}/")), Resolved::Redirect(format!("/{id}/index.html")));
 
