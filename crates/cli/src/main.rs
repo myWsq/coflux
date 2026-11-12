@@ -7,6 +7,7 @@
 
 mod account;
 mod annotations;
+mod canvas;
 mod args;
 mod browser_login;
 mod commands;
@@ -78,6 +79,11 @@ Commands for agents running in a Coflux terminal:
       selector, and screenshot/reference image paths. list prints the pending ones as
       markdown; watch blocks until there are some (default 30 minutes); after implementing
       one, resolve it with a note the user reads to review the change.
+  coflux canvas show <file.html> [--title "<title>"]
+  coflux canvas list [--json]
+      Show an HTML file (a mockup, a comparison, research results) to the user in a tab of
+      their Coflux desktop. Files beside it load too. show returns at once; run it again on
+      the same file after editing. Feedback comes as annotations or in the conversation.
   coflux executor run --prompt=<task> [--title=<title>] [--write] [--timeout <seconds>]
       Hand a well-bounded sub-task to the built-in executor and wait for its final reply and
       the files it changed. Each run is one-shot. Read-only unless --write, with one writing
@@ -175,6 +181,7 @@ fn main() {
         "executor" => commands::run_executor(&parsed),
         "workspace" => commands::run_workspace(&parsed),
         "annotations" => annotations::run(&parsed),
+        "canvas" => canvas::run(&parsed),
         other => {
             die_with(
                 &format!("Unknown command: {other}"),

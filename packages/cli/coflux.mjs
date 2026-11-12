@@ -14,8 +14,8 @@ const HOME = process.env.COFLUX_HOME || join(homedir(), ".coflux");
 // only too: it speaks the worker's kernel-attested socket and masks child output, and one
 // implementation of that is enough (plan 20260926-agent-secret-input). `annotations` is native only
 // as well: the worker keeps browser annotations and the Rust CLI renders them (plan
-// 20260929-browser-annotations).
-if (process.argv[2] === "agent" || process.argv[2] === "secret" || process.argv[2] === "annotations" || (process.argv[2] === "workspace" && process.argv[3] === "enter")) {
+// 20260929-browser-annotations). So is `canvas` (plan 20261112-agent-canvas).
+if (process.argv[2] === "agent" || process.argv[2] === "secret" || process.argv[2] === "annotations" || process.argv[2] === "canvas" || (process.argv[2] === "workspace" && process.argv[3] === "enter")) {
   const native = process.env.COFLUX_AGENT_BUNDLE
     ? join(process.env.COFLUX_AGENT_BUNDLE, "coflux")
     : join(HOME, "bin", "coflux");
@@ -668,6 +668,11 @@ Commands for agents running in a Coflux terminal:
       selector, and screenshot/reference image paths. list prints the pending ones as
       markdown; watch blocks until there are some (default 30 minutes); after implementing
       one, resolve it with a note the user reads to review the change.
+  coflux canvas show <file.html> [--title "<title>"]
+  coflux canvas list [--json]
+      Show an HTML file (a mockup, a comparison, research results) to the user in a tab of
+      their Coflux desktop. Files beside it load too. show returns at once; run it again on
+      the same file after editing. Feedback comes as annotations or in the conversation.
   coflux executor run --prompt=<task> [--title=<title>] [--write] [--timeout <seconds>]
       Hand a well-bounded sub-task to the built-in executor and wait for its final reply and
       the files it changed. Each run is one-shot. Read-only unless --write, with one writing

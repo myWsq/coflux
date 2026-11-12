@@ -31,6 +31,10 @@ const SKILL_REFERENCES: &[(&str, &str)] = &[
         include_str!("../../../packages/cli/skills/coflux/references/annotations.md"),
     ),
     (
+        "skills/coflux/references/canvas.md",
+        include_str!("../../../packages/cli/skills/coflux/references/canvas.md"),
+    ),
+    (
         "skills/coflux/references/executor.md",
         include_str!("../../../packages/cli/skills/coflux/references/executor.md"),
     ),

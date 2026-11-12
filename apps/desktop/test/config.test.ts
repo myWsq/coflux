@@ -117,6 +117,7 @@ test("内置 coflux 插件目录随 daemon 资源目录进包、不进 mac.binar
     "skills/coflux/SKILL.md",
     "skills/coflux/references/account-cli.md",
     "skills/coflux/references/annotations.md",
+    "skills/coflux/references/canvas.md",
     "skills/coflux/references/executor.md",
     "skills/coflux/references/handles.md",
     "skills/coflux/references/workspaces.md",
