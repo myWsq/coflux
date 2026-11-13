@@ -469,7 +469,7 @@ jobs:
           fi
 
       - name: 发布 GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ github.ref_name }}
           # 不传 target_commitish：tag 已存在且上一步已校验它绑定事件 SHA；action-gh-release v3 会把它原样带进
