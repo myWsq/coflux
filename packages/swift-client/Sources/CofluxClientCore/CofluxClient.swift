@@ -255,10 +255,16 @@ public final class CofluxClient {
 
     /// PTY 数据面（plan 046）。输出字节不进可观察状态：经 consumer 闭包直达终端 feed。
     private var deviceRouter: DeviceRouter!
-    /// 单 consumer（iOS 同刻只有一个详情页；web 版的多 consumer 集合是超配，store.ts:298）。
-    private var sessionConsumers: [String: (Data, _ replace: Bool) -> Void] = [:]
-    /// 注册令牌：换绑竞态下旧 release 闭包不得误删新 consumer。
-    private var sessionConsumerTokens: [String: UUID] = [:]
+    private struct SessionConsumer {
+        let token: UUID
+        let deliver: (Data, _ replace: Bool) -> Void
+    }
+
+    /// Every registered consumer of a session, oldest first. The newest one receives the output;
+    /// the session is suspended when the last one leaves. Several can be registered at once: a
+    /// layout switch mounts the new terminal view before the old one is torn down, and may mount
+    /// a short-lived one in between, in any order.
+    private var sessionConsumers: [String: [SessionConsumer]] = [:]
     private var liveSessionIDs: Set<String> = []
     /// 设备事实先于中心事实到达的窗口：session 已退出但 server task 还没更新（store.ts:376-384
     /// localSessions 合并语义的最小移植——iOS 无 UI 消费 pid/cwd，只留退出覆盖）。
@@ -293,11 +299,11 @@ public final class CofluxClient {
             sendControl: { [weak self] payload in self?.send(payload) },
             onSessionSnapshot: { [weak self] _, _, sessionID, data in
                 self?.liveSessionIDs.insert(sessionID)
-                self?.sessionConsumers[sessionID]?(data, true)
+                self?.sessionConsumers[sessionID]?.last?.deliver(data, true)
             },
             onSessionOutput: { [weak self] _, _, sessionID, data in
                 self?.liveSessionIDs.insert(sessionID)
-                self?.sessionConsumers[sessionID]?(data, false)
+                self?.sessionConsumers[sessionID]?.last?.deliver(data, false)
             },
             onSessionAttached: { [weak self] _, taskID, _ in
                 self?.finishAttachIndicator(taskID)
@@ -409,7 +415,6 @@ public final class CofluxClient {
         serverRunningSessions = [:]
         deviceTransports = [:]
         sessionConsumers = [:]
-        sessionConsumerTokens = [:]
         snapshotRevision = 0
     }
 
@@ -744,7 +749,7 @@ public final class CofluxClient {
             // server 侧终端镜像：live 输出在场时不覆盖现场，只在无 live 时投给终端做只读回放
             sessionCheckpoints[checkpoint.sessionID] = checkpoint
             if !liveSessionIDs.contains(checkpoint.sessionID) {
-                sessionConsumers[checkpoint.sessionID]?(checkpoint.ansiSnapshot, true)
+                sessionConsumers[checkpoint.sessionID]?.last?.deliver(checkpoint.ansiSnapshot, true)
             }
 
         case .portsUpdated(let value):
@@ -866,7 +871,6 @@ public final class CofluxClient {
             sessionAgents[sessionID] = nil
             secretRequests = secretRequests.filter { $0.value.sessionID != sessionID }
             sessionConsumers[sessionID] = nil
-            sessionConsumerTokens[sessionID] = nil
             deviceRouter.forgetSession(daemonID: task.daemonID, sessionID: sessionID)
         }
     }
@@ -1086,18 +1090,32 @@ public final class CofluxClient {
     ) -> @MainActor () -> Void {
         let routedTask = tasks.first { $0.hasSessionID && $0.sessionID == sessionID }
         let token = UUID()
-        sessionConsumers[sessionID] = consumer
-        sessionConsumerTokens[sessionID] = token
+        let taking = sessionConsumers[sessionID]?.isEmpty == false
+        sessionConsumers[sessionID, default: []].append(SessionConsumer(token: token, deliver: consumer))
+        if taking, let routedTask {
+            // The session is already attached for an earlier consumer; this one has seen none of
+            // its output, so it starts from a full snapshot.
+            deviceRouter.refreshSnapshot(daemonID: routedTask.daemonID, sessionID: sessionID)
+        }
         if let checkpoint = sessionCheckpoints[sessionID], !liveSessionIDs.contains(sessionID) {
             consumer(checkpoint.ansiSnapshot, true)
         }
         return { [weak self] in
-            guard let self, self.sessionConsumerTokens[sessionID] == token else { return }
-            self.sessionConsumers[sessionID] = nil
-            self.sessionConsumerTokens[sessionID] = nil
-            self.liveSessionIDs.remove(sessionID)
-            if let routedTask {
-                self.deviceRouter.suspendSession(daemonID: routedTask.daemonID, sessionID: sessionID)
+            guard let self, var consumers = self.sessionConsumers[sessionID],
+                  let index = consumers.firstIndex(where: { $0.token == token }) else { return }
+            let wasReceiving = index == consumers.count - 1
+            consumers.remove(at: index)
+            self.sessionConsumers[sessionID] = consumers.isEmpty ? nil : consumers
+            guard wasReceiving else { return }
+            if consumers.isEmpty {
+                self.liveSessionIDs.remove(sessionID)
+                if let routedTask {
+                    self.deviceRouter.suspendSession(daemonID: routedTask.daemonID, sessionID: sessionID)
+                }
+            } else if let routedTask {
+                // The output goes back to an earlier consumer that is still registered: a full
+                // snapshot covers what it missed.
+                self.deviceRouter.refreshSnapshot(daemonID: routedTask.daemonID, sessionID: sessionID)
             }
         }
     }

@@ -424,6 +424,14 @@ final class DeviceRouter {
         }
     }
 
+    /// The session's output now goes to another terminal consumer while the session stays desired
+    /// (`suspendSession` never ran in between): a plain attach would be a no-op and that consumer
+    /// would only get incremental output. Ask for a full snapshot so it starts from the whole screen.
+    func refreshSnapshot(daemonID: String, sessionID: String) {
+        guard let route = routes[daemonID], let session = route.sessions[sessionID], session.desired else { return }
+        requestSnapshotRecovery(route, session)
+    }
+
     /// terminal consumer 释放（页面离开）：desired 置 false，空闲则释放通道。
     func suspendSession(daemonID: String, sessionID: String) {
         guard let route = routes[daemonID], let session = route.sessions[sessionID] else { return }
