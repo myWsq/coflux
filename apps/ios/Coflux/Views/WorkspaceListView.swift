@@ -16,15 +16,13 @@ struct WorkspaceListView: View {
     @State private var showingSettings = false
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    HomeSections(client: client, surface: .stack, onOpen: open)
-                }
-                .padding(.bottom, 24)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                HomeSections(client: client, surface: .stack, onOpen: open)
             }
-            .revealsShownWorkspace(client: client, proxy: proxy)
+            .padding(.bottom, 24)
         }
+        .expandsShownWorkspace(client: client)
         .scrollIndicators(.hidden)
         .background(Theme.background)
         .safeAreaInset(edge: .top, spacing: 0) {

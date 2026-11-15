@@ -85,7 +85,7 @@ final class SceneNavigation {
     }
 
     /// Bumped by every `show`: the home and the sidebar answer it by expanding the shown
-    /// workspace's project and scrolling to its row (the desktop's `revealNonce`, plan
+    /// workspace's project, without scrolling (after the desktop's `revealNonce`, plan
     /// 20261115-ios-current-section). A counter, not the selection, so showing the workspace that
     /// is already selected — its project collapsed by hand since — reveals it again.
     private(set) var revealNonce = 0
