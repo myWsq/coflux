@@ -1387,6 +1387,21 @@ CREATE TABLE coflux.account_speech_refine (
 );
 `;
 
+/** Version 14 (plan 20261115-persist-agent-seen): the account-wide "seen" mark of a finished agent
+ * turn, one row per terminal — the terminal session and the agent session the mark was made
+ * against. The hub reads every row once at start and answers from memory; a row goes when the agent
+ * starts another turn, another session takes over the terminal, or the task is deleted (the foreign
+ * key). **One-way**: a server rolled back to a build before this migration refuses the database. */
+const AGENT_SEEN_SCHEMA_SQL = `
+CREATE TABLE coflux.agent_seen (
+  task_id TEXT PRIMARY KEY REFERENCES coflux.tasks(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  agent_session_id TEXT NOT NULL DEFAULT '',
+  seen_at DOUBLE PRECISION NOT NULL
+);
+`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -1477,6 +1492,12 @@ const MIGRATIONS: readonly Migration[] = [
     name: "account_speech_refine",
     definition: ACCOUNT_SPEECH_REFINE_SCHEMA_SQL,
     async apply(sql) { await sql.unsafe(ACCOUNT_SPEECH_REFINE_SCHEMA_SQL); },
+  },
+  {
+    version: 14,
+    name: "agent_seen",
+    definition: AGENT_SEEN_SCHEMA_SQL,
+    async apply(sql) { await sql.unsafe(AGENT_SEEN_SCHEMA_SQL); },
   },
 ];
 

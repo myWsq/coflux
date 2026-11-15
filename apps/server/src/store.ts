@@ -62,6 +62,13 @@ export type SpeechProviderRecord = {
   ciphertext: string | null;
   updatedAt: number;
 };
+/** The "seen" mark of a terminal's finished agent turn as stored in `agent_seen` (plan
+ * 20261115-persist-agent-seen): which terminal session and which agent session it was made against. */
+export type AgentSeenMark = {
+  taskId: TaskId;
+  sessionId: string;
+  agentSessionId: string;
+};
 /** The account's dictation correction record as stored in `account_speech_refine` (plan
  * 20261109-dictation-refine): the switch, base URL and model as typed and the key ciphertext, NULL
  * when no key is stored. An account without a row reads as disabled and unconfigured, updatedAt 0. */
@@ -1625,6 +1632,37 @@ export class Store {
 
   async removeSessionCheckpointsByDaemon(daemonId: DaemonId): Promise<void> {
     await this.sql`DELETE FROM session_checkpoints WHERE daemon_id = ${daemonId}`;
+  }
+
+  /* --------------------------- agent seen --------------------------- */
+
+  /** Every "seen" mark of a finished agent turn (plan 20261115-persist-agent-seen); read once when
+   * the hub starts. */
+  async listAgentSeen(): Promise<AgentSeenMark[]> {
+    // Column names arrive camel-cased (`transform: postgres.camel`).
+    const rows = await this.sql<{ taskId: string; sessionId: string; agentSessionId: string }[]>`
+      SELECT task_id, session_id, agent_session_id FROM agent_seen
+    `;
+    return rows.map((row) => ({ taskId: row.taskId as TaskId, sessionId: row.sessionId, agentSessionId: row.agentSessionId }));
+  }
+
+  /** Records a terminal's mark, replacing an older one. A task deleted in the meantime is not an
+   * error: the mark has nothing left to describe. */
+  async putAgentSeen(accountId: AccountId, mark: AgentSeenMark, now: number): Promise<void> {
+    await this.sql`
+      INSERT INTO agent_seen (task_id, account_id, session_id, agent_session_id, seen_at)
+      SELECT ${mark.taskId}, ${accountId}, ${mark.sessionId}, ${mark.agentSessionId}, ${now}
+      WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ${mark.taskId})
+      ON CONFLICT (task_id) DO UPDATE SET
+        account_id = excluded.account_id,
+        session_id = excluded.session_id,
+        agent_session_id = excluded.agent_session_id,
+        seen_at = excluded.seen_at
+    `;
+  }
+
+  async removeAgentSeen(taskId: TaskId): Promise<void> {
+    await this.sql`DELETE FROM agent_seen WHERE task_id = ${taskId}`;
   }
 
   /* ------------------------ executor settings ----------------------- */
