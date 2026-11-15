@@ -180,3 +180,11 @@ Out of scope:
 ### Merge and deploy
 
 iOS-only; reaches the user through a direct device install or the next `ios-<N>` tag. No server, runtime or migration change. After the update the tall page opens collapsed once (the flag's default), so the terminal there is taller than before.
+
+## Outcome
+
+- Status: COMPLETE — 2026-11-15
+- Mode: self
+- Commits: `5b12f025..a857f429`
+- Deviations: none against the decisions. Within Your call: the key block recognises the drag with a `UIPanGestureRecognizer` (one finger, mostly-downward start, `cancelsTouchesInView`) and drops the other fingers' keys itself; the Claude row uses a SwiftUI simultaneous drag and its keys ignore their release once the drag goes down; the dock stays fixed at the bottom while the keyboard rises over it (as the quick rows do in the other layouts), cross-fading; the reveal's limit is computed (`FullTerminalKeyboard.flatHeight` minus the measured dock height); the flag is stored under `terminal.tallKeyboardExpanded`. The tall arrangement no longer keeps one keyboard identity across the flat and laptop poses (D8 leaves the laptop pose undesigned). The build used a fresh derived-data path (`/tmp/coflux-dd-keyboard-forms`): the shared one had a broken SwiftTerm checkout.
+- Follow-ups: device acceptance on the Duo inner display was not run (the phone was unavailable over USB). Check there: the swipe up from the dock and the swipe down on the keyboard follow the finger and settle; two-thumb typing does not put the keyboard away (tune `keyboardCollapseTravel`, 80 pt, and the cross-fade if needed); a swipe begun on a Claude-row key or a letter sends nothing; the form survives closing and opening the phone and a relaunch; the terminal list from the avatars stays in place while expanded.
