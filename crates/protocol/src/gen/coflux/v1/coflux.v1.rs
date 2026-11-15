@@ -136,7 +136,7 @@ pub struct PortPreview {
 }
 /// worker 周期扫描存活会话 PTY 进程树检测到的 agent CLI（plan 073）。
 /// 派生运行时事实：server 只做内存镜像 + 广播，不落库；daemon 断开即全部清空。
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionAgentRef {
     #[prost(string, tag="1")]
     pub session_id: ::prost::alloc::string::String,
@@ -173,6 +173,11 @@ pub struct SessionAgentRef {
     /// the centre ignores it on input.
     #[prost(bool, tag="8")]
     pub seen: bool,
+    /// Milliseconds since the epoch at which this entry's `state` was entered, on the daemon's clock.
+    /// Set by the daemon and copied unchanged by the centre. It identifies "the same turn" and is
+    /// compared only for equality, never against another clock. 0 = not reported (older daemon).
+    #[prost(double, tag="9")]
+    pub state_since: f64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {

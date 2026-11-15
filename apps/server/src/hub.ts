@@ -277,6 +277,10 @@ interface SessionAgentData {
    * SessionSeen, held only in memory, carried over across daemon reports while the turn stays
    * finished and the agent session id is unchanged. The daemon's own value is ignored. */
   seen: boolean;
+  /** The moment the entry's state was entered, in milliseconds on the daemon's clock (plan
+   * 20261115-agent-turn-identity): copied from the daemon's report, compared only for equality,
+   * never the centre's clock. 0 = not reported (older daemon) or not a finite number ≥ 0. */
+  stateSince: number;
 }
 
 /** A pending secret request (plan 20260926-agent-secret-input): metadata only, never the value.
@@ -2153,8 +2157,10 @@ export class Hub {
       const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
       // 形状不对就当没有（第二道防线；第一道是「id 永远作为独立 argv 传递」，见 plan 20260919）。
       const agentSessionId = validAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : "";
+      const stateSince = Number.isFinite(entry.stateSince) && entry.stateSince >= 0 ? entry.stateSince : 0;
       // Seen is decided against the terminal's stored mark, so it holds across a daemon reconnect
-      // and a centre restart: the same terminal session, the same agent session, a finished turn.
+      // and a centre restart: the same terminal session, the same agent session, a finished turn
+      // entered at the same moment (so a later turn in the same state is not the one looked at).
       // Any other report for a marked terminal — a new turn, another session — clears the mark.
       // Whatever the daemon sent in `seen` is ignored.
       const mark = this.seenMarks.get(entry.taskId);
@@ -2162,9 +2168,20 @@ export class Hub {
         mark !== undefined &&
         mark.sessionId === entry.sessionId &&
         mark.agentSessionId === agentSessionId &&
+        mark.stateSince === stateSince &&
         FINISHED_AGENT_STATES.has(entry.state);
       if (mark !== undefined && !seen) this.clearSeenMark(mark.taskId);
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId, seen });
+      valid.push({
+        sessionId: entry.sessionId,
+        taskId: entry.taskId,
+        agent: entry.agent,
+        state: entry.state,
+        message,
+        progress,
+        agentSessionId,
+        seen,
+        stateSince,
+      });
     }
     const unchanged =
       previous !== undefined &&
@@ -2180,7 +2197,9 @@ export class Hub {
           // 漏掉这条，Claude `/clear`（state 不变、只换 session）就永远不会重播。
           p.agentSessionId === valid[i]!.agentSessionId &&
           // A carry-over that clears the mark must broadcast too.
-          p.seen === valid[i]!.seen,
+          p.seen === valid[i]!.seen &&
+          // A new turn in the same state is a change too.
+          p.stateSince === valid[i]!.stateSince,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
@@ -2199,7 +2218,12 @@ export class Hub {
       if (index < 0) continue;
       const session = entry.sessions[index]!;
       if (session.seen || !FINISHED_AGENT_STATES.has(session.state)) return;
-      this.recordSeenMark(accountId, { taskId: session.taskId as TaskId, sessionId, agentSessionId: session.agentSessionId });
+      this.recordSeenMark(accountId, {
+        taskId: session.taskId as TaskId,
+        sessionId,
+        agentSessionId: session.agentSessionId,
+        stateSince: session.stateSince,
+      });
       const sessions = entry.sessions.map((s, i) => (i === index ? { ...s, seen: true } : s));
       this.sessionAgents.set(daemonId, { accountId, sessions });
       this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions } });
