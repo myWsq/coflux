@@ -16,11 +16,18 @@ import UIKit
 ///   can press at once (hold ctrl, tap c) and keys send on release.
 /// - Space types a space on a tap and talks on a hold.
 /// - The secret-request bar floats above the keyboard's top edge, outside its measured height.
+/// - With `onCollapseDrag` set, a downward drag anywhere on the keyboard is reported to the host
+///   (which puts the keyboard away) and the keys under it send nothing.
 struct FullTerminalKeyboard: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
     /// Every row's height: `flatKeyHeight`, or the share of the region below the fold.
     var keyHeight: CGFloat = Self.flatKeyHeight
+    /// A downward drag over the keyboard: its vertical translation so far, in window
+    /// coordinates (the keyboard moves under the finger). Nil: the keyboard cannot be dragged.
+    var onCollapseDrag: ((CGFloat) -> Void)?
+    /// The drag ended: its predicted final vertical translation.
+    var onCollapseDragEnd: ((CGFloat) -> Void)?
     /// The keyboard's measured height (the secret bar left out).
     let onHeight: (CGFloat) -> Void
     /// Open the secret request sheet of the active terminal.
@@ -38,6 +45,19 @@ struct FullTerminalKeyboard: View {
     static let flatKeyHeight: CGFloat = 48
     static let topPadding: CGFloat = 8
     static let bottomPadding: CGFloat = 8
+
+    /// The whole keyboard's height fully open: the Claude row, the key block and the padding.
+    static var flatHeight: CGFloat {
+        topPadding + flatKeyHeight + FullKeyBlockView.rowGap
+            + FullKeyBlockView.height(keyHeight: flatKeyHeight) + bottomPadding
+    }
+
+    /// A drag over the Claude row is under way (resets by itself however the drag ends).
+    @GestureState private var draggingRow = false
+    /// The current drag over the Claude row goes down: its keys send nothing (their buttons
+    /// would otherwise fire on release, as the keyboard follows the finger).
+    @State private var rowSwiped = false
+    @State private var rowPredictedTranslation: CGFloat = 0
 
     /// The key height that lets all six rows share `height` (the laptop pose's region below the
     /// fold), never below the flat one.
@@ -64,6 +84,8 @@ struct FullTerminalKeyboard: View {
             FullKeyBlock(
                 sender: sender,
                 keyHeight: keyHeight,
+                onCollapseDrag: onCollapseDrag,
+                onCollapseDragEnd: onCollapseDragEnd,
                 onDictatePrewarm: onDictatePrewarm,
                 onDictateBegin: onDictateBegin,
                 onDictateMove: onDictateMove,
@@ -98,18 +120,16 @@ struct FullTerminalKeyboard: View {
             let unit = proxy.size.width / FullKeyBlockView.columns
             HStack(spacing: 0) {
                 slot(7, unit: unit) {
-                    TerminalKey(sender: sender, label: "esc", height: height, functionSurface: true) { "\u{1b}" }
+                    rowKey("esc", height: height) { "\u{1b}" }
                         .accessibilityLabel("Escape")
                 }
                 slot(10, unit: unit) {
-                    TerminalKey(sender: sender, label: "⇧⇥ 模式", height: height, functionSurface: true) { "\u{1b}[Z" }
+                    rowKey("⇧⇥ 模式", height: height) { "\u{1b}[Z" }
                         .accessibilityLabel("Shift Tab，切换模式")
                 }
                 slot(7, unit: unit) {
-                    TerminalKey(sender: sender, label: "^C", style: .destructive, height: height, functionSurface: true) {
-                        "\u{03}"
-                    }
-                    .accessibilityLabel("Control C")
+                    rowKey("^C", style: .destructive, height: height) { "\u{03}" }
+                        .accessibilityLabel("Control C")
                 }
                 Color.clear
                     .frame(width: max(0, unit * 18))
@@ -118,7 +138,9 @@ struct FullTerminalKeyboard: View {
                     pasteKey(height: height)
                 }
                 slot(9, unit: unit) {
-                    Button(action: onCompose) {
+                    Button {
+                        if !rowSwiped { onCompose() }
+                    } label: {
                         KeyCap(label: "中文", height: height, functionSurface: true)
                     }
                     .buttonStyle(KeyPressStyle())
@@ -129,6 +151,52 @@ struct FullTerminalKeyboard: View {
         .frame(height: height)
         .disabled(!running)
         .opacity(running ? 1 : FullKeyBlockView.inertAlpha)
+        // The gap between the keys takes the drag too.
+        .contentShape(Rectangle())
+        .simultaneousGesture(rowDrag, isEnabled: onCollapseDrag != nil)
+        // A drag the system cancelled never reaches onEnded: end it here. After a normal end
+        // the host finds no drag running and does nothing. The keys come back a turn of the run
+        // loop later, after a button under the finger has had its release.
+        .onChange(of: draggingRow) { _, dragging in
+            guard !dragging else { return }
+            onCollapseDragEnd?(rowPredictedTranslation)
+            Task { @MainActor in rowSwiped = false }
+        }
+    }
+
+    /// The Claude row's share of the collapse drag (the key block has its own recogniser): a
+    /// drag that goes mostly down. Global coordinates, as the keyboard moves under the finger.
+    private var rowDrag: some Gesture {
+        DragGesture(minimumDistance: 10, coordinateSpace: .global)
+            .updating($draggingRow) { _, state, _ in state = true }
+            .onChanged { value in
+                if !rowSwiped {
+                    let moved = value.translation
+                    guard moved.height > 0, moved.height > abs(moved.width) * 1.5 else { return }
+                    rowSwiped = true
+                }
+                rowPredictedTranslation = value.predictedEndTranslation.height
+                onCollapseDrag?(value.translation.height)
+            }
+            .onEnded { value in
+                if rowSwiped { onCollapseDragEnd?(value.predictedEndTranslation.height) }
+            }
+    }
+
+    /// A Claude row key: sends once per tap, and nothing when the touch became a collapse drag.
+    private func rowKey(
+        _ label: String,
+        style: KeyStyle = .normal,
+        height: CGFloat,
+        bytes: @escaping () -> String
+    ) -> some View {
+        let sender = sender
+        return Button {
+            if !rowSwiped { sender.press(bytes()) }
+        } label: {
+            KeyCap(label: label, style: style, height: height, functionSurface: true)
+        }
+        .buttonStyle(KeyPressStyle())
     }
 
     private func slot(_ span: CGFloat, unit: CGFloat, @ViewBuilder _ key: () -> some View) -> some View {
@@ -142,6 +210,7 @@ struct FullTerminalKeyboard: View {
     private func pasteKey(height: CGFloat) -> some View {
         let sender = sender
         return Button {
+            guard !rowSwiped else { return }
             let pasteboard = UIPasteboard.general
             if pasteboard.hasImages || !pasteboard.hasStrings {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -162,6 +231,8 @@ struct FullTerminalKeyboard: View {
 private struct FullKeyBlock: UIViewRepresentable {
     let sender: TerminalKeySender
     let keyHeight: CGFloat
+    let onCollapseDrag: ((CGFloat) -> Void)?
+    let onCollapseDragEnd: ((CGFloat) -> Void)?
     let onDictatePrewarm: () -> Void
     let onDictateBegin: () -> Void
     let onDictateMove: (CGPoint) -> Void
@@ -179,6 +250,8 @@ private struct FullKeyBlock: UIViewRepresentable {
         view.onPress = { key, modifiers, repeated in
             Self.press(key, modifiers: modifiers, repeated: repeated, sender: sender)
         }
+        view.onCollapseDrag = onCollapseDrag
+        view.onCollapseDragEnd = onCollapseDragEnd
         view.onDictatePrewarm = onDictatePrewarm
         view.onDictateBegin = onDictateBegin
         view.onDictateMove = onDictateMove
@@ -238,6 +311,8 @@ private struct FullKeyBlock: UIViewRepresentable {
 /// - Space (D6): a tap types a space; held for 0.33 s the microphone prewarms, held for 0.45 s
 ///   talking begins and the finger's window position streams to the dictation overlay. While
 ///   talking every other finger is ignored.
+/// - A downward drag (when the host takes one, `onCollapseDrag`) drops every finger's key and is
+///   reported instead; it is not recognised while talking.
 final class FullKeyBlockView: UIView {
     /// The grid's width in columns: a letter key takes 4.
     static let columns: CGFloat = 58
@@ -376,8 +451,17 @@ final class FullKeyBlockView: UIView {
     var onDictateMove: (CGPoint) -> Void = { _ in }
     var onDictateEnd: () -> Void = {}
     var onDictateAbort: () -> Void = {}
+    /// A downward drag over the block: its vertical translation so far, in window coordinates.
+    /// Nil: no drag is recognised.
+    var onCollapseDrag: ((CGFloat) -> Void)? {
+        didSet { collapsePan.isEnabled = onCollapseDrag != nil }
+    }
+    /// The drag ended: its predicted final vertical translation.
+    var onCollapseDragEnd: ((CGFloat) -> Void)?
 
     // MARK: State
+
+    private lazy var collapsePan = UIPanGestureRecognizer(target: self, action: #selector(collapsePanChanged))
 
     private var caps: [FullKeyCapView] = []
     private var accessibilityKeys: [FullKeyAccessibilityElement] = []
@@ -398,6 +482,11 @@ final class FullKeyBlockView: UIView {
             return element
         }
         accessibilityElements = accessibilityKeys
+        collapsePan.maximumNumberOfTouches = 1
+        // Keys send on release at once: a recogniser that has not begun must not hold it back.
+        collapsePan.delaysTouchesEnded = false
+        collapsePan.isEnabled = false
+        addGestureRecognizer(collapsePan)
         refresh()
     }
 
@@ -495,6 +584,36 @@ final class FullKeyBlockView: UIView {
         super.willMove(toWindow: newWindow)
         // Taken off screen mid-press: a prewarmed microphone must be released.
         if newWindow == nil { cancelAllTouches() }
+    }
+
+    // MARK: Collapse drag
+
+    /// Only a drag that sets off mostly downwards, and never while talking (the finger slides
+    /// over the keys onto 发送 / 取消 then).
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        guard recognizer === collapsePan else { return super.gestureRecognizerShouldBegin(recognizer) }
+        guard !talking else { return false }
+        let velocity = collapsePan.velocity(in: nil)
+        return velocity.y > 0 && velocity.y > abs(velocity.x) * 1.5
+    }
+
+    @objc private func collapsePanChanged(_ pan: UIPanGestureRecognizer) {
+        let translation = pan.translation(in: nil).y
+        switch pan.state {
+        case .began:
+            // The recogniser cancels its own finger's key; the other fingers' keys go too.
+            cancelAllTouches()
+            onCollapseDrag?(translation)
+        case .changed:
+            onCollapseDrag?(translation)
+        case .ended:
+            // Where a flick would carry on to, as SwiftUI predicts a drag's end.
+            onCollapseDragEnd?(translation + pan.velocity(in: nil).y * 0.25)
+        case .cancelled, .failed:
+            onCollapseDragEnd?(translation)
+        default:
+            break
+        }
     }
 
     /// Drops every finger as if the system cancelled them.
