@@ -83,6 +83,10 @@ struct WorkspaceDetailView: View {
     /// Tall layout, half folded with a horizontal fold: the keypad is inline below the fold and
     /// the 按键 toolbar item goes away (plan D9).
     @State private var laptopPose = false
+    /// The tall layout's keyboard form, fully open: the full-size keyboard is out (true) or the
+    /// page rests on the two-row dock. One habit for the whole app, kept across launches; it
+    /// changes only when a drag or a toggle settles there.
+    @AppStorage("terminal.tallKeyboardExpanded") private var tallKeyboardExpanded = false
     /// The list of every terminal, opened from the active avatar.
     @State private var showingTerminalList = false
 
@@ -110,6 +114,12 @@ struct WorkspaceDetailView: View {
 
     private var activeTask: Coflux_V1_Task? {
         members.first { $0.id == activeTaskID }
+    }
+
+    /// The tall layout fully open: the page with the two keyboard forms. Half folded it keeps
+    /// the full-size keyboard below the fold.
+    private var tallFlat: Bool {
+        layout == .tall && !laptopPose
     }
 
     private var shortWindow: Bool {
@@ -298,9 +308,21 @@ struct WorkspaceDetailView: View {
                 claimTerminals(activating: activeTaskID)
             }
             // An open keypad whose height changed (a wider window adds ← →): follow it.
+            // In the tall layout the height is the full keyboard's share above the dock, and the
+            // remembered form decides.
             .onChange(of: keypadHeight) { old, height in
-                guard keypadDragStart == nil, old > 0, keypadReveal == old else { return }
-                keypadReveal = height
+                guard keypadDragStart == nil else { return }
+                if tallFlat {
+                    keypadReveal = tallKeyboardExpanded ? height : 0
+                } else if old > 0, keypadReveal == old {
+                    keypadReveal = height
+                }
+            }
+            // Arriving at the tall layout fully open (the phone opened, or unfolded from half
+            // open) the keyboard takes its remembered form; leaving it, nothing stays pulled out.
+            .onChange(of: tallFlat, initial: true) { _, flat in
+                keypadDragStart = nil
+                keypadReveal = flat && tallKeyboardExpanded ? keypadHeight : 0
             }
             // Activating a terminal (swipe, list, card, sidebar) takes it from another window.
             .onChange(of: activeTaskID) { _, id in
@@ -367,28 +389,31 @@ struct WorkspaceDetailView: View {
     }
 
     /// The tall layout (mockup T1/T2, plan D9): the whole page is one overlay arrangement — the
-    /// pager of terminals as the secondary view, the full-size keyboard as the primary one (it
-    /// replaces the dock here, mockup `20261110-ios-inner-tall-keyboard-mockup`). Fully open
-    /// there is no dividing region: the keyboard overlays the terminal, which ends above it at
-    /// 48 pt keys and resizes only when the keyboard's height changes, never while typing (D8).
+    /// pager of terminals as the secondary view, the input as the primary one. Fully open there
+    /// is no dividing region and the input has two forms (`tallInput`): the two-row dock, and
+    /// the full-size keyboard pulled up from it; the terminal always ends above the dock and is
+    /// pushed up by the keyboard, never resized for it.
     /// Half folded with a horizontal fold (laptop pose) the system places the terminal before
-    /// the fold and the keyboard after it, top-aligned, its rows sharing the region's height.
-    /// The pose is read from the reserved regions only — never from sensors or the window size —
-    /// and both changes land in the same layout pass, so the transition resizes the terminal once.
+    /// the fold and the full-size keyboard after it, top-aligned, its rows sharing the region's
+    /// height; there is no dock there.
+    /// The pose is read from the reserved regions only — never from sensors or the window size.
     private var tallArrangement: some View {
         GeometryReader { proxy in
             let laptop = Self.isLaptopPose(proxy)
             ArrangementView {
-                // One reader in both poses, so the keyboard keeps its identity (and the fingers
-                // on it) across a pose change. Key sizes come from the region offered, never from
-                // the keyboard's measured height.
+                // Key sizes come from the region offered, never from the keyboard's measured
+                // height.
                 GeometryReader { region in
-                    fullKeyboard(
-                        keyHeight: laptop
-                            ? FullTerminalKeyboard.keyHeight(filling: region.size.height)
-                            : FullTerminalKeyboard.flatKeyHeight,
-                        laptop: laptop
-                    )
+                    Group {
+                        if laptop {
+                            fullKeyboard(
+                                keyHeight: FullTerminalKeyboard.keyHeight(filling: region.size.height),
+                                collapsible: false
+                            )
+                        } else {
+                            tallInput
+                        }
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: laptop ? .top : .bottom)
                 }
                 .overlayArrangementEdge(VerticalEdge.bottom)
@@ -401,6 +426,43 @@ struct WorkspaceDetailView: View {
             .onChange(of: laptop, initial: true) { _, isLaptop in
                 laptopPose = isLaptop
             }
+        }
+    }
+
+    /// The tall layout's input, fully open: the dock at the bottom, and over it the full-size
+    /// keyboard, whose top edge rises `keypadReveal` above the dock's (it follows the finger, as
+    /// the extra keys do in the other layouts). The two cross-fade on the way. The dock takes
+    /// the touches while the form is collapsed and the keyboard while it is expanded; that
+    /// changes only when a drag settles, never under a finger.
+    private var tallInput: some View {
+        let progress = keypadHeight > 0 ? min(max(keypadReveal / keypadHeight, 0), 1) : 0
+        let expanded = tallKeyboardExpanded
+        // Never exactly 0 for the form that owns the touches: a view at zero opacity stops
+        // taking them, which would cancel the drag that is fading it.
+        let dockOpacity = max(expanded ? 0 : 0.001, 1 - min(1, progress * 2))
+        let keyboardOpacity = max(expanded ? 0.001 : 0, min(1, progress * 1.5))
+        let height = restingDockHeight > 0 ? restingDockHeight + keypadReveal : nil
+        return ZStack(alignment: .bottom) {
+            dock(inlineKeypad: false, extraKeys: false)
+                .opacity(dockOpacity)
+                .allowsHitTesting(!expanded)
+                .accessibilityHidden(expanded)
+            if restingDockHeight > 0 {
+                fullKeyboard(keyHeight: FullTerminalKeyboard.flatKeyHeight, collapsible: true)
+                    // Top-aligned at its own height: what does not fit yet hangs below the
+                    // page's bottom edge, cut off by the mask.
+                    .frame(height: height, alignment: .top)
+                    .background(Theme.background)
+                    .opacity(keyboardOpacity)
+                    .allowsHitTesting(expanded)
+                    .accessibilityHidden(!expanded)
+                    .accessibilityAction(named: "收起键盘") { setKeypad(open: false) }
+            }
+        }
+        .frame(height: height, alignment: .bottom)
+        // Not `.clipped()`: the secret-request bar floats above the top edge and must show.
+        .mask {
+            Rectangle().padding(.top, -200)
         }
     }
 
@@ -617,6 +679,9 @@ struct WorkspaceDetailView: View {
                     }
                 }
             }
+            .padding(.bottom, reserveDock ? restingDockHeight : 0)
+            .offset(y: reserveDock ? -keypadReveal : 0)
+            // After the offset: the list stays under the avatars when the terminal rides up.
             .overlay(alignment: .topTrailing) {
                 ZStack(alignment: .topTrailing) {
                     // A tap anywhere else closes the list.
@@ -638,10 +703,8 @@ struct WorkspaceDetailView: View {
                     .padding(.top, barsOnRail ? 6 : 10)
                     .padding(.trailing, 10)
                 }
+                .padding(.bottom, reserveDock ? restingDockHeight : 0)
             }
-            .padding(.bottom, reserveDock ? restingDockHeight : 0)
-        // The tall layout has no keypad to pull out.
-        .offset(y: reserveDock && layout != .tall ? -keypadReveal : 0)
     }
 
     /// 分页容器用 ScrollView：全部任务页同时挂载（各自 attach 保活），左右滑动切换。第一页再往回
@@ -697,16 +760,21 @@ struct WorkspaceDetailView: View {
         .ignoresSafeArea(.keyboard)
     }
 
-    private func dock(inlineKeypad: Bool) -> some View {
+    /// The dock. Without `extraKeys` (the tall layout) it is only the quick rows, and what its
+    /// swipe pulls out is the full-size keyboard: the height that can come out is that
+    /// keyboard's share above the dock.
+    private func dock(inlineKeypad: Bool, extraKeys: Bool = true) -> some View {
         TerminalInputArea(
             client: client,
             task: activeTask,
             inlineKeypad: inlineKeypad,
+            extraKeys: extraKeys,
             bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
-            keypadReveal: inlineKeypad ? 0 : keypadReveal,
+            keypadReveal: inlineKeypad || !extraKeys ? 0 : keypadReveal,
             onKeypadHeight: { keypadHeight = $0 },
             onRestingHeight: { height in
                 if !inlineKeypad { restingDockHeight = height }
+                if !extraKeys { keypadHeight = max(0, FullTerminalKeyboard.flatHeight - height) }
             },
             onKeypadDrag: { keypadDragChanged($0) },
             onKeypadDragEnd: { keypadDragEnded($0) },
@@ -724,16 +792,17 @@ struct WorkspaceDetailView: View {
         )
     }
 
-    /// The tall layout's keyboard, wired like the dock. Fully open its height is the resting
-    /// height the terminal ends above; in the laptop pose the terminal ends at the fold.
-    private func fullKeyboard(keyHeight: CGFloat, laptop: Bool) -> some View {
+    /// The tall layout's full-size keyboard, wired like the dock. `collapsible` (fully open): a
+    /// downward drag over it puts it away. In the laptop pose it stays, and the terminal ends at
+    /// the fold.
+    private func fullKeyboard(keyHeight: CGFloat, collapsible: Bool) -> some View {
         FullTerminalKeyboard(
             client: client,
             task: activeTask,
             keyHeight: keyHeight,
-            onHeight: { height in
-                if !laptop { restingDockHeight = height }
-            },
+            onCollapseDrag: collapsible ? { keypadDragChanged($0) } : nil,
+            onCollapseDragEnd: collapsible ? { keypadDragEnded($0, fromKeyboard: true) } : nil,
+            onHeight: { _ in },
             onOpenSecret: { openSecretSheet() },
             onCompose: {
                 guard !dictationOverlayVisible else { return }
@@ -898,7 +967,12 @@ struct WorkspaceDetailView: View {
     /// must collapse — needing half the keypad's height made it feel ignored); a hesitant release
     /// settles by where the keypad is. A short window has no room below the terminal, so an
     /// upward flick opens the keypad as a sheet there.
-    private func keypadDragEnded(_ predictedTranslation: CGFloat) {
+    ///
+    /// A drag that began on the full-size keyboard (`fromKeyboard`) is held to more: fingers
+    /// typing there drag a little all the time, so only a pull predicted to travel past
+    /// `keyboardCollapseTravel`, or one that already brought the keyboard less than half out,
+    /// puts it away.
+    private func keypadDragEnded(_ predictedTranslation: CGFloat, fromKeyboard: Bool = false) {
         if shortWindow {
             if predictedTranslation < -24, !dictationOverlayVisible { showingKeypad = true }
             return
@@ -906,7 +980,9 @@ struct WorkspaceDetailView: View {
         guard keypadDragStart != nil else { return }
         keypadDragStart = nil
         let open: Bool
-        if predictedTranslation < -24 {
+        if fromKeyboard {
+            open = predictedTranslation <= Self.keyboardCollapseTravel && keypadReveal >= keypadHeight / 2
+        } else if predictedTranslation < -24 {
             open = true
         } else if predictedTranslation > 24 {
             open = false
@@ -915,6 +991,10 @@ struct WorkspaceDetailView: View {
         }
         setKeypad(open: open)
     }
+
+    /// How far down a drag over the full-size keyboard must be predicted to travel to put it
+    /// away (a starting value, to tune on the device).
+    private static let keyboardCollapseTravel: CGFloat = 80
 
     /// The handle's tap.
     private func toggleKeypad() {
@@ -925,9 +1005,11 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    /// Animates the keypad open or shut with a little spring; the terminal rides along.
+    /// Animates the keypad open or shut with a little spring; the terminal rides along. In the
+    /// tall layout this is where the keyboard's form settles, and is remembered.
     private func setKeypad(open: Bool) {
         keypadDragStart = nil
+        if tallFlat { tallKeyboardExpanded = open }
         withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
             keypadReveal = open ? keypadHeight : 0
         }

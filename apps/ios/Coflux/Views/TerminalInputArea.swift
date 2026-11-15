@@ -335,6 +335,9 @@ struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
     var inlineKeypad = false
+    /// The dock pulls its extra keys out. Off in the tall layout, where the same swipe raises the
+    /// full-size keyboard instead and the dock is only the quick rows.
+    var extraKeys = true
     /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
     var bottomGap: CGFloat = 8
     /// How much of the extra keys show above the key rows, 0 … their natural height.
@@ -404,22 +407,24 @@ struct TerminalInputArea: View {
             // shown through a window that grows upwards from the quick rows, so the row nearest
             // them comes out first, as if rising from behind them; the keys fade and settle from
             // slightly smaller while they come.
-            TerminalExtraKeys(client: client, task: task)
-                .padding(.horizontal, Self.sideInset)
-                .padding(.top, 8)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                    extrasHeight = height
-                    onKeypadHeight(height)
-                }
-                .opacity(progress)
-                .scaleEffect(0.92 + 0.08 * progress, anchor: .bottom)
-                .frame(height: keypadReveal, alignment: .bottom)
-                .clipped()
-                // Hit-testable while a drag runs: dropping hit testing mid-drag (as the keys
-                // shrink) would cancel the drag and leave the keypad half out.
-                .allowsHitTesting(progress > 0.9 || draggingKeypad)
-                .accessibilityHidden(keypadReveal == 0)
+            if extraKeys {
+                TerminalExtraKeys(client: client, task: task)
+                    .padding(.horizontal, Self.sideInset)
+                    .padding(.top, 8)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        extrasHeight = height
+                        onKeypadHeight(height)
+                    }
+                    .opacity(progress)
+                    .scaleEffect(0.92 + 0.08 * progress, anchor: .bottom)
+                    .frame(height: keypadReveal, alignment: .bottom)
+                    .clipped()
+                    // Hit-testable while a drag runs: dropping hit testing mid-drag (as the keys
+                    // shrink) would cancel the drag and leave the keypad half out.
+                    .allowsHitTesting(progress > 0.9 || draggingKeypad)
+                    .accessibilityHidden(keypadReveal == 0)
+            }
             keyRows
                 .padding(.horizontal, Self.sideInset)
                 .padding(.top, 8)
@@ -439,7 +444,7 @@ struct TerminalInputArea: View {
         }
         // No handle (user's call, 2026-11-08): the swipe over the keys is the whole gesture.
         // VoiceOver gets it as an action.
-        .accessibilityAction(named: keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
+        .accessibilityAction(named: !extraKeys ? "展开键盘" : keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
         // Outside the measured size, floating just above the dock's top edge — so it rises with
         // the extra keys — over the terminal's last line: the notice never resizes the terminal
         // (D13).
