@@ -287,3 +287,11 @@ Out of scope:
 
 iOS only: no centre deploy, no desktop release. Ships with the next `ios-<N>` tag after merge.
 CI does not build the iOS app; the device compile above is the only automated gate.
+
+## Outcome
+
+- Status: COMPLETE — 2026-11-15
+- Mode: self
+- Commits: `0321437c..b41fa52a`
+- Deviations: none from the decisions. Three points the brief left open, decided in the code: (1) on the outer display a 「当前」 row with a secret request opens only the input sheet over the home, as that page did before, while the sidebar opens the terminal and the sheet; (2) `WorkspaceActivity` now knows the `error` state (「出错了」, destructive tone), which the collapsed summary needs, so workspace rows show it too; (3) workspace rows under a project are in tree order (main first, then by creation), as 「当前」 is. A row that waits with a message gives its second line to the message and drops 「项目 · 分支」 unless the sidebar is wide; progress text shows only when wide.
+- Follow-ups: the walkthrough on the iPhone Duo (outer, inner wide, inner tall) is the owner's and is pending; nothing was run on a device. `SecretRequestInfo.ordered` is internal to the Swift client, so the derivation repeats its two-key comparison.
