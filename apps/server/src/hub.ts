@@ -79,6 +79,7 @@ import {
   type SpeechProviderId,
   type SpeechProviderRecord,
   type SpeechRefineRecord,
+  type AgentSeenMark,
 } from "./store.js";
 import { genToken, hashToken } from "./secrets.js";
 import { config } from "./config.js";
@@ -645,6 +646,15 @@ export class Hub {
   /** agent presence（plan 073）：daemon 上报的"会话进程树内检测到的 agent CLI"。派生运行时
    * 事实——纯内存、不落库，daemon 断开即清空并广播；订阅时按设备补发当前全量。 */
   private sessionAgents = new Map<DaemonId, { accountId: AccountId; sessions: SessionAgentData[] }>();
+  /** The "seen" marks of finished agent turns, by task (plan 20261115-persist-agent-seen). Unlike
+   * presence they are stored (`agent_seen`): read once at start, answered from here, so a mark
+   * outlives a daemon reconnect and a centre restart. Presence reports that arrive before the read
+   * finishes wait for it (`seenMarksReady`), in order. */
+  private seenMarks = new Map<string, AgentSeenMark>();
+  private seenMarksLoaded = false;
+  private readonly seenMarksReady: Promise<void>;
+  /** Mark writes run one after another, so a clear never lands before the mark it follows. */
+  private seenWrites: Promise<void> = Promise.resolve();
   /** Pending secret requests (plan 20260926-agent-secret-input): the daemon's latest SecretRequests
    * snapshot, validated like presence. Memory only, never persisted: a center restart must not
    * resurrect requests nobody can answer. Cleared and broadcast empty when the daemon disconnects;
@@ -737,6 +747,15 @@ export class Hub {
       }, 10 * 60_000);
       this.authPruneTimer.unref?.();
     }
+    this.seenMarksReady = store.listAgentSeen().then(
+      (marks) => {
+        // A mark made while the read was in flight is newer than its row.
+        for (const mark of marks) if (!this.seenMarks.has(mark.taskId)) this.seenMarks.set(mark.taskId, mark);
+      },
+      (error) => log.warn("loading agent seen marks failed; finished turns start unseen", { error: String(error) }),
+    ).then(() => {
+      this.seenMarksLoaded = true;
+    });
     this.authPages = new AuthPages(this);
     this.localControl = new LocalControlPlane(
       store,
@@ -2119,7 +2138,6 @@ export class Hub {
     const daemonId = daemon.info.daemonId;
     const live = this.catalog.get(daemonId);
     const previous = this.sessionAgents.get(daemonId);
-    const previousBySession = new Map(previous?.sessions.map((p) => [p.sessionId, p]));
     const valid: SessionAgentData[] = [];
     for (const entry of sessions.slice(0, MAX_AGENT_ENTRIES)) {
       if (!validControlId(entry.sessionId) || !validControlId(entry.taskId)) continue;
@@ -2135,10 +2153,17 @@ export class Hub {
       const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
       // 形状不对就当没有（第二道防线；第一道是「id 永远作为独立 argv 传递」，见 plan 20260919）。
       const agentSessionId = validAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : "";
-      // The mark survives a re-report of the same finished turn only; a new turn (any other state)
-      // or a new agent session clears it. Whatever the daemon sent in `seen` is ignored.
-      const before = previousBySession.get(entry.sessionId);
-      const seen = before !== undefined && before.seen && FINISHED_AGENT_STATES.has(entry.state) && before.agentSessionId === agentSessionId;
+      // Seen is decided against the terminal's stored mark, so it holds across a daemon reconnect
+      // and a centre restart: the same terminal session, the same agent session, a finished turn.
+      // Any other report for a marked terminal — a new turn, another session — clears the mark.
+      // Whatever the daemon sent in `seen` is ignored.
+      const mark = this.seenMarks.get(entry.taskId);
+      const seen =
+        mark !== undefined &&
+        mark.sessionId === entry.sessionId &&
+        mark.agentSessionId === agentSessionId &&
+        FINISHED_AGENT_STATES.has(entry.state);
+      if (mark !== undefined && !seen) this.clearSeenMark(mark.taskId);
       valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId, seen });
     }
     const unchanged =
@@ -2174,11 +2199,30 @@ export class Hub {
       if (index < 0) continue;
       const session = entry.sessions[index]!;
       if (session.seen || !FINISHED_AGENT_STATES.has(session.state)) return;
+      this.recordSeenMark(accountId, { taskId: session.taskId as TaskId, sessionId, agentSessionId: session.agentSessionId });
       const sessions = entry.sessions.map((s, i) => (i === index ? { ...s, seen: true } : s));
       this.sessionAgents.set(daemonId, { accountId, sessions });
       this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions } });
       return;
     }
+  }
+
+  /** Marks are a convenience: memory changes at once, the row follows, and a failed write is only
+   * logged — the broadcast never waits for the database. */
+  private recordSeenMark(accountId: AccountId, mark: AgentSeenMark): void {
+    this.seenMarks.set(mark.taskId, mark);
+    this.queueSeenWrite(() => this.store.putAgentSeen(accountId, mark, Date.now()));
+  }
+
+  private clearSeenMark(taskId: TaskId): void {
+    this.seenMarks.delete(taskId);
+    this.queueSeenWrite(() => this.store.removeAgentSeen(taskId));
+  }
+
+  private queueSeenWrite(write: () => Promise<void>): void {
+    this.seenWrites = this.seenWrites
+      .then(write)
+      .catch((error) => log.warn("writing an agent seen mark failed", { error: String(error) }));
   }
 
   /** Pending secret requests (plan 20260926-agent-secret-input): each entry must name a session of
@@ -2777,7 +2821,16 @@ export class Hub {
       }
       case "sessionAgents": {
         const daemon = this.currentDaemon(conn);
-        if (daemon) this.acceptSessionAgents(daemon, msg.payload.value.sessions);
+        if (!daemon) break;
+        const sessions = msg.payload.value.sessions;
+        if (this.seenMarksLoaded) {
+          this.acceptSessionAgents(daemon, sessions);
+        } else {
+          // Right after a start: decide "seen" only once the stored marks are in memory.
+          void this.seenMarksReady.then(() => {
+            if (this.isCurrentDaemon(daemon)) this.acceptSessionAgents(daemon, sessions);
+          });
+        }
         break;
       }
       case "secretRequests": {
