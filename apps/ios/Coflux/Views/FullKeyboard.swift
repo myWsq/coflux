@@ -158,7 +158,7 @@ struct FullTerminalKeyboard: View {
         // the host finds no drag running and does nothing. The keys come back a turn of the run
         // loop later, after a button under the finger has had its release.
         .onChange(of: draggingRow) { _, dragging in
-            guard !dragging else { return }
+            guard !dragging, rowSwiped else { return }
             onCollapseDragEnd?(rowPredictedTranslation)
             Task { @MainActor in rowSwiped = false }
         }

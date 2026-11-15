@@ -444,7 +444,7 @@ struct TerminalInputArea: View {
         }
         // No handle (user's call, 2026-11-08): the swipe over the keys is the whole gesture.
         // VoiceOver gets it as an action.
-        .accessibilityAction(named: keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
+        .accessibilityAction(named: !extraKeys ? "展开键盘" : keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
         // Outside the measured size, floating just above the dock's top edge — so it rises with
         // the extra keys — over the terminal's last line: the notice never resizes the terminal
         // (D13).
