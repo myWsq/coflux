@@ -84,6 +84,20 @@ final class SceneNavigation {
         centreSeen || (taskID.map { seenFinishedTaskIDs.contains($0) } ?? false)
     }
 
+    /// Bumped by every `show`: the home and the sidebar answer it by expanding the shown
+    /// workspace's project and scrolling to its row (the desktop's `revealNonce`, plan
+    /// 20261115-ios-current-section). A counter, not the selection, so showing the workspace that
+    /// is already selected — its project collapsed by hand since — reveals it again.
+    private(set) var revealNonce = 0
+    /// The reveal this window last carried out, so a surface rebuilt by a layout change does not
+    /// undo a project the user collapsed since.
+    var handledReveal: RevealKey?
+
+    struct RevealKey: Equatable {
+        let nonce: Int
+        let projectID: String
+    }
+
     struct PendingTerminal: Equatable {
         let workspaceID: String
         let knownTaskIDs: Set<String>
@@ -116,6 +130,7 @@ final class SceneNavigation {
         if let taskID { activeTaskByWorkspace[workspaceID] = taskID }
         self.workspaceID = workspaceID
         overlayVisibility = .detailOnly
+        revealNonce += 1
     }
 
     /// A device row of the sidebar: that device's terminal page. Kept as the 设备 stack's path,
@@ -145,5 +160,6 @@ final class SceneNavigation {
         overlayVisibility = .detailOnly
         pendingTerminal = nil
         seenFinishedTaskIDs = []
+        handledReveal = nil
     }
 }
