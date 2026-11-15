@@ -333,6 +333,7 @@ fn merge_annotations(
                 progress: String::new(),
                 agent_session_id: String::new(),
                 seen: false,
+                state_since: 0.0,
             })
             .collect();
         sessions.extend(reported);
@@ -432,6 +433,7 @@ mod tests {
             progress: String::new(),
             agent_session_id: String::new(),
             seen: false,
+            state_since: 0.0,
         }]
     }
 
