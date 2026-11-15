@@ -65,6 +65,16 @@ the baseline is not signed in, nothing is copied and the instance starts at the 
 sign in once, and that profile keeps it. After the first start the profiles are independent: signing
 out of one preview does not touch any other.
 
+**Against a local server the preview signs in by itself.** An unpackaged build whose server is on a
+loopback host (`pnpm dev:desktop`) logs in at every start with the local server's own
+`COFLUX_USERNAME` / `COFLUX_PASSWORD` (default `admin` / `admin`) and keeps that session in
+`session-token.local.bin`, beside — never over — the profile's `session-token.bin`. So a local stack
+with a fresh or temporary database needs no typing, and switching the same worktree back to
+`dev:desktop:prod` finds its production session untouched. It only works while the local server is
+up and in password mode; a failure is logged (`dev sign-in to the local server failed`) and the
+window opens at the sign-in screen. `COFLUX_DESKTOP_DEV_LOGIN=0` turns it off, for looking at the
+sign-in screen itself. A packaged app and any non-loopback server never do this.
+
 The launcher passes the app three labelled inputs — `COFLUX_DESKTOP_USER_DATA`,
 `COFLUX_DESKTOP_RENDERER_PORT`, `COFLUX_DESKTOP_INSTANCE_LABEL` — and the app derives nothing
 itself. Setting `COFLUX_DESKTOP_USER_DATA` yourself overrides the profile and skips seeding.
