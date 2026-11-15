@@ -193,3 +193,12 @@ Out of scope:
 Centre only. Migration 14 is one-way: take the usual pre-deploy database backup, and do not roll
 the server back past it. No desktop, daemon or iOS release is needed; the fix takes effect when
 the centre is deployed. Marks made before the deploy are not recovered (they were never stored).
+
+## Outcome
+
+- Status: COMPLETE — 2026-11-15
+- Mode: self
+- Commits: `384e65c4..a85b59d4`
+- Deviations: none. Hub paths that delete a task do not drop its in-memory mark; the row goes through the foreign key and the stale entry is harmless until the next start.
+- Verification: server typecheck green; black-box suite 95/95 on a fresh database (migration 14 applied) — run before the one-line read fix `a85b59d4`, not rerun after it; one-off acceptance on the test harness, run after the fix, 5/5: a finished turn starts unseen, a client marks it, it is still seen after a centre restart on the same database with the daemon reconnecting, a new turn clears it, and it stays cleared after another restart. The acceptance run caught a real defect the typecheck could not: the store camel-cases column names, so the first read of the table returned nothing usable.
+- Follow-ups: a turn identifier in presence, to close the known limit (a whole turn run while the daemon is disconnected is taken for the seen one). The centre must be deployed for the fix to take effect; not deployed here.
