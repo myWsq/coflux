@@ -66,10 +66,10 @@ struct ProjectSummary {
         switch activities.map(\.rank).max() {
         case 2:
             text = "正在执行"
-            color = Theme.success
+            color = Theme.info
         case 1:
             text = "本轮完成"
-            color = Theme.info
+            color = Theme.success
         default:
             return nil
         }

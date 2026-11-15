@@ -73,11 +73,12 @@ struct WorkspaceActivity {
         case idle
         case failed
 
+        /// Blue while the agent works, green once its turn is finished (the desktop's check mark).
         var color: Color {
             switch self {
             case .waiting: Theme.warning
-            case .active: Theme.success
-            case .done: Theme.info
+            case .active: Theme.info
+            case .done: Theme.success
             case .idle: Theme.mutedForeground
             case .failed: Theme.destructive
             }
