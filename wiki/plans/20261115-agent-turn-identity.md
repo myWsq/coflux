@@ -245,3 +245,12 @@ Out of scope:
   additive and reads 0 when absent).
 - The fix is complete on a device only once its runtime is the released one.
 - iOS and desktop receive regenerated protocol code only; neither needs a release for this.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-15
+- Mode: subagent(opus); no revision round
+- Commits: `92580310..553f6d80`
+- Deviations: none. Generated side effect accepted: prost drops `Eq` and `Hash` from `SessionAgentRef` because the new field is an `f64`; nothing used them.
+- Verification: buf lint, regeneration leaves the tree clean, protocol breaking check; Rust tests all pass (runtime 349 incl. three new stamping tests, protocol 34, cli 57, ptyd 14, launcher 9); zero-warning build; server and desktop typecheck; black-box suite 95/95 (first attempt failed fetching Ghostty sources from GitHub, the rerun passed); one-off acceptance on the test harness 4/4 — a finished turn reports its moment, a centre restart with no new turn keeps it seen, and a whole turn run while the centre was down comes back unseen with another moment.
+- Follow-ups: none.
