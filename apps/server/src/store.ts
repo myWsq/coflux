@@ -1639,10 +1639,11 @@ export class Store {
   /** Every "seen" mark of a finished agent turn (plan 20261115-persist-agent-seen); read once when
    * the hub starts. */
   async listAgentSeen(): Promise<AgentSeenMark[]> {
-    const rows = await this.sql<{ task_id: string; session_id: string; agent_session_id: string }[]>`
+    // Column names arrive camel-cased (`transform: postgres.camel`).
+    const rows = await this.sql<{ taskId: string; sessionId: string; agentSessionId: string }[]>`
       SELECT task_id, session_id, agent_session_id FROM agent_seen
     `;
-    return rows.map((row) => ({ taskId: row.task_id as TaskId, sessionId: row.session_id, agentSessionId: row.agent_session_id }));
+    return rows.map((row) => ({ taskId: row.taskId as TaskId, sessionId: row.sessionId, agentSessionId: row.agentSessionId }));
   }
 
   /** Records a terminal's mark, replacing an older one. A task deleted in the meantime is not an
