@@ -337,9 +337,11 @@ struct TerminalInputArea: View {
     let task: Coflux_V1_Task?
     /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
     var bottomGap: CGFloat = 8
-    /// The page's bars are a vertical rail beside the dock: the letter layer reaches under it,
-    /// across the whole window, like the system keyboard. The quick layer stays beside it.
-    var reachesUnderRail = false
+    /// The rail beside the dock, as the page's leading and trailing safe-area insets (zero
+    /// without a rail): the letter layer reaches under it, across the whole window, like the
+    /// system keyboard. The quick layer stays beside it. The host reads them from the page,
+    /// which reaches the window's edges; the dock itself sits inside them and would read zero.
+    var railInsets = EdgeInsets()
     /// How far the letter layer is out: 0 (quick layer) … `letterLift` (letter layer).
     var keypadReveal: CGFloat = 0
     /// How much taller the letter layer is than the quick layer (`letterLift`).
@@ -372,9 +374,6 @@ struct TerminalInputArea: View {
     /// A swipe over the letter layer is under way (reported by the letter surface itself, which
     /// also reports its end when cancelled or taken away).
     @State private var swipingLetters = false
-    /// The dock's horizontal safe-area insets: where the rail is, on either side. Read from the
-    /// offered geometry; the dock's width never depends on them, so they never feed back.
-    @State private var sideInsets = EdgeInsets()
 
     private var sender: TerminalKeySender {
         TerminalKeySender(client: client, task: task)
@@ -413,12 +412,8 @@ struct TerminalInputArea: View {
         .frame(height: Self.quickRowsHeight + Self.topPadding + bottomGap + max(0, keypadReveal), alignment: .bottom)
         // Clipped to the dock's height, so the letter layer shows only as far as the dock has
         // grown; open sideways by the rail, so the letter layer can run under it.
-        .clipShape(SidewaysOpenRectangle(overhang: max(railReach.leading, railReach.trailing)))
+        .clipShape(SidewaysOpenRectangle(overhang: max(railInsets.leading, railInsets.trailing)))
         .background(Theme.terminal)
-        .onGeometryChange(for: EdgeInsets.self) { proxy in
-            let insets = proxy.safeAreaInsets
-            return EdgeInsets(top: 0, leading: insets.leading, bottom: 0, trailing: insets.trailing)
-        } action: { sideInsets = $0 }
         // From static row metrics, so it never feeds back (see `letterLift`).
         .onAppear { onKeypadHeight(lift) }
         // A drag the system cancelled never reaches onEnded: settle it here. After a normal end
@@ -455,12 +450,6 @@ struct TerminalInputArea: View {
             .simultaneousGesture(keypadDrag(minimumDistance: 10))
     }
 
-    /// How far the letter layer runs past the dock on each side: under the rail, wherever it is;
-    /// nothing without one.
-    private var railReach: EdgeInsets {
-        reachesUnderRail ? sideInsets : EdgeInsets()
-    }
-
     /// Lower-case letters and digits laid out like the iOS system keyboard, as one multi-touch
     /// surface (`FullKeyBlock`, letter layout) with 42 pt keys, wired to the active terminal;
     /// dimmed and inert while it does not run. Always mounted, so a swipe begun on it runs to
@@ -485,10 +474,17 @@ struct TerminalInputArea: View {
         .padding(.horizontal, Self.sideInset)
         .padding(.top, Self.topPadding)
         .padding(.bottom, bottomGap)
-        // Under the rail the dock's own background does not reach.
-        .background(reachesUnderRail ? Theme.terminal : .clear)
-        .padding(.leading, -railReach.leading)
-        .padding(.trailing, -railReach.trailing)
+        .padding(.leading, -railInsets.leading)
+        .padding(.trailing, -railInsets.trailing)
+        // The dock's background ends at the rail: the strips under it get their own, fading
+        // with the layer. Only the strips, so the quick layer behind is never dimmed.
+        .background {
+            HStack(spacing: 0) {
+                Theme.terminal.frame(width: railInsets.leading)
+                Spacer(minLength: 0)
+                Theme.terminal.frame(width: railInsets.trailing)
+            }
+        }
     }
 
     /// `progress` eased onto 0 … 1 between `from` and `to`: the layers' cross-fade.

@@ -52,8 +52,13 @@ struct WorkspaceDetailView: View {
     @State private var restingDockHeight: CGFloat = 0
     /// The page's content size: decides where the toolbar items go.
     @State private var pageSize: CGSize = .zero
-    /// The page's widest side safe-area inset: the system's rail, when it draws one.
-    @State private var railInset: CGFloat = 0
+    /// The page's leading and trailing safe-area insets: the system's rail sits in the wider one,
+    /// when it draws one, on either side.
+    @State private var sideInsets = EdgeInsets()
+    /// The page's widest side safe-area inset: the rail's width, when there is one.
+    private var railInset: CGFloat {
+        max(sideInsets.leading, sideInsets.trailing)
+    }
     /// The page's size pinned while the compose layer is up (see `base`).
     @State private var frozenPageSize: CGSize?
 
@@ -241,10 +246,11 @@ struct WorkspaceDetailView: View {
                 dictationBounds = frame
                 pageSize = frame.size
             }
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                max(proxy.safeAreaInsets.leading, proxy.safeAreaInsets.trailing)
-            } action: { inset in
-                railInset = inset
+            .onGeometryChange(for: EdgeInsets.self) { proxy in
+                let insets = proxy.safeAreaInsets
+                return EdgeInsets(top: 0, leading: insets.leading, bottom: 0, trailing: insets.trailing)
+            } action: { insets in
+                sideInsets = insets
             }
             .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
             .sheet(isPresented: $showingPhotoPicker) {
@@ -678,7 +684,7 @@ struct WorkspaceDetailView: View {
             client: client,
             task: activeTask,
             bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
-            reachesUnderRail: barsOnRail,
+            railInsets: barsOnRail ? sideInsets : EdgeInsets(),
             keypadReveal: keypadReveal,
             onKeypadHeight: { keypadHeight = $0 },
             onRestingHeight: { restingDockHeight = $0 },
