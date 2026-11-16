@@ -218,3 +218,33 @@ Out of scope:
 - Deviations: the letter layer still swipes while the terminal is not running (its keys are dimmed and send nothing) — accepted, otherwise the dock could be stuck on the letter layer until the terminal runs; a few comments outside the listed anchors reworded to drop "extra keys" / short-window wording.
 - Verification: iOS device compile BUILD SUCCEEDED with exactly the baseline's warnings (none in touched files); no `TerminalExtraKeys` / `showingKeypad` / `shortWindow` / `shortPageHeight` / `inlineKeypad` left under `apps/ios`; diff reviewed against D1–D7. Installed on the Duo (Debug, direct install); the walkthrough is the owner's.
 - Follow-ups: device check that the hidden letter layer never takes taps at rest (it relies on SwiftUI `allowsHitTesting(false)` over a `UIViewRepresentable`) and that a swipe down starting on a letter key types nothing. A fresh worktree needs `apps/ios/Frameworks/CofluxTailcat.xcframework` copied in (a symlink is not accepted) and its own `-derivedDataPath` to build.
+
+## Revision 1 — an iOS-style letter layer (2026-11-17)
+
+### Why
+
+On the Duo the owner found the first letter layer "not like a normal keyboard" and asked for the iOS system keyboard's layout as the reference: ⌫ up on the z row, the confirm key (⏎) in the bottom-right corner.
+
+### Product conclusions (confirmed by the owner)
+
+```
+1  2  3  4  5  6  7  8  9  0
+q  w  e  r  t  y  u  i  o  p
+  a  s  d  f  g  h  j  k  l
+-  /  z  x  c  v  b  n  m  ⌫
+[          space          ][ ⏎ ]
+```
+
+- Ten equal key widths per row; the a row indented half a key on each side; the z row is `- / z x c v b n m ⌫`; the bottom row is a wide space and ⏎ (about two and a half keys) in the bottom-right corner.
+- iOS proportions: keys about 42 pt high, rows about 10 pt apart, letters about 22 pt, no key borders. Letters, digits, `-`, `/` and space on the lighter key fill; ⌫ on the darker function fill; ⏎ inverted (primary). Colours stay Coflux dark-theme tokens.
+- The block grows to about 250 pt; the terminal rides up about 160 pt without resizing. Everything else is unchanged (swipe up / down, lower case only, space never talks, ⌫ repeats).
+
+### Decisions
+
+- **D8 The letter layout carries its own metrics** (key height, row gap, key spacing, corner radius, border, letter font) so it can match iOS proportions while the Mac layout keeps every metric it has today (D3 still holds). `-` and `/` are plain character keys like the digits. `(revised after walkthrough)`
+
+### Discussion log
+
+11. Walkthrough: "not like a normal keyboard, follow the iOS layout"; "⌫ back up top; bottom-right should be the confirm key".
+12. What goes left of z, where iOS has ⇧: empty (recommended) / esc / common symbols → **`-` and `/`**.
+13. Product confirmation of the iOS-style layout and proportions → **confirmed**; execution as before (subagent opus, same branch, then install on the Duo).
