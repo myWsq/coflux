@@ -443,15 +443,15 @@ struct TerminalInputArea: View {
             .simultaneousGesture(keypadDrag(minimumDistance: 10))
     }
 
-    /// Lower-case letters and digits as one multi-touch surface (`FullKeyBlock`, letter layout)
-    /// at the quick keys' height, wired to the active terminal; dimmed and inert while it does
-    /// not run. Always mounted, so a swipe begun on it runs to its end. Its own vertical swipe
-    /// drives the dock like the quick layer's drag.
+    /// Lower-case letters and digits laid out like the iOS system keyboard, as one multi-touch
+    /// surface (`FullKeyBlock`, letter layout) with 42 pt keys, wired to the active terminal;
+    /// dimmed and inert while it does not run. Always mounted, so a swipe begun on it runs to
+    /// its end. Its own vertical swipe drives the dock like the quick layer's drag.
     private var letterLayer: some View {
         FullKeyBlock(
             layout: .letters,
             sender: sender,
-            keyHeight: Theme.Metrics.keyHeight,
+            keyHeight: Theme.Metrics.letterKeyHeight,
             onSwipe: { translation in
                 swipingLetters = true
                 onKeypadDrag(translation)
@@ -485,9 +485,9 @@ struct TerminalInputArea: View {
         Theme.Metrics.keyHeight * 2 + quickSpacing
     }
 
-    /// The letter block's height, at the quick keys' key height.
+    /// The letter block's height: five 42 pt rows 10 pt apart, 250 pt.
     private static var letterRowsHeight: CGFloat {
-        FullKeyBlockView.height(keyHeight: Theme.Metrics.keyHeight, layout: .letters)
+        FullKeyBlockView.height(keyHeight: Theme.Metrics.letterKeyHeight, layout: .letters)
     }
 
     /// How much taller the letter layer is than the quick layer (both share the top padding and

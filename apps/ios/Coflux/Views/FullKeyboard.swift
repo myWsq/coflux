@@ -42,7 +42,7 @@ struct FullTerminalKeyboard: View {
     /// The key height that lets all six rows share `height` (the laptop pose's region below the
     /// fold), never below the flat one.
     static func keyHeight(filling height: CGFloat) -> CGFloat {
-        let rows = height - topPadding - bottomPadding - FullKeyBlockView.rowGap * 5
+        let rows = height - topPadding - bottomPadding - FullKeyBlockView.Layout.mac.rowGap * 5
         return max(flatKeyHeight, (rows / 6).rounded(.down))
     }
 
@@ -59,7 +59,7 @@ struct FullTerminalKeyboard: View {
     }
 
     var body: some View {
-        VStack(spacing: FullKeyBlockView.rowGap) {
+        VStack(spacing: FullKeyBlockView.Layout.mac.rowGap) {
             claudeRow
             FullKeyBlock(
                 layout: .mac,
@@ -134,7 +134,7 @@ struct FullTerminalKeyboard: View {
 
     private func slot(_ span: CGFloat, unit: CGFloat, @ViewBuilder _ key: () -> some View) -> some View {
         key()
-            .padding(.horizontal, FullKeyBlockView.keyMargin)
+            .padding(.horizontal, FullKeyBlockView.Layout.mac.keyMargin)
             .frame(width: max(0, unit * span))
     }
 
@@ -257,9 +257,26 @@ final class FullKeyBlockView: UIView {
             case gap(Int)
         }
 
+        /// How the caps are drawn: the Mac keyboard's, or the iOS system keyboard's.
+        enum Caps {
+            /// Bordered caps, the full keyboard's fonts (`Theme.Fonts.FullKeyboard`).
+            case mac
+            /// Borderless caps with the system keyboard's larger, lighter glyphs
+            /// (`Theme.Fonts.LetterKeyboard`).
+            case system
+        }
+
         /// The grid's width in columns.
         let columns: CGFloat
         fileprivate let rows: [[Item]]
+        /// The vertical gap between rows.
+        let rowGap: CGFloat
+        /// Each key's inset from its columns on either side.
+        let keyMargin: CGFloat
+        let keyRadius: CGFloat
+        /// Caps have a 1 pt border.
+        let bordered: Bool
+        let caps: Caps
         /// Space held talks (D6); otherwise it only types a space.
         let spaceTalks: Bool
         /// A vertical swipe of one finger moves the surface's host (the dock's letter layer).
@@ -267,6 +284,12 @@ final class FullKeyBlockView: UIView {
 
         private static func characterKeys(_ pairs: [(String, String)]) -> [Item] {
             pairs.map { .key(.character(base: $0.0, shifted: $0.1), span: 4) }
+        }
+
+        /// Characters without a shifted alternate (the same character both ways): the cap shows
+        /// the character alone.
+        private static func plainKeys(_ characters: String) -> [Item] {
+            characterKeys(characters.map { (String($0), String($0)) })
         }
 
         private static func letterKeys(_ letters: String) -> [Item] {
@@ -301,36 +324,46 @@ final class FullKeyBlockView: UIView {
                     .key(.arrow(.left), span: 5), .key(.arrow(.down), span: 5), .key(.arrow(.right), span: 5),
                 ],
             ],
+            rowGap: 6,
+            keyMargin: 3,
+            keyRadius: 12,
+            bordered: true,
+            caps: .mac,
             spaceTalks: true,
             swipes: false
         )
 
-        /// The dock's letter layer, lower case only, on 40 columns (a key takes 4):
+        /// The dock's letter layer, laid out and drawn like the iOS system keyboard, lower case
+        /// only, on 40 columns (a key takes 4):
         ///
-        ///     1 2 3 4 5 6 7 8 9 0
-        ///     q w e r t y u i o p
-        ///     a s d f g h j k l ⏎
-        ///     z x c v b n m ␣ ⌫
+        ///     1  2  3  4  5  6  7  8  9  0
+        ///     q  w  e  r  t  y  u  i  o  p
+        ///       a  s  d  f  g  h  j  k  l        indented half a key each side
+        ///     -  /  z  x  c  v  b  n  m  ⌫
+        ///     [          space          ][ ⏎ ]   30 and 10 columns
         ///
-        /// A digit is a character key without a shifted alternate (the same character both ways):
-        /// there is no ⇧ here, and its cap shows the digit alone.
+        /// Digits, `-` and `/` are character keys without a shifted alternate: there is no ⇧
+        /// here, and their caps show the character alone. Rows 10 pt apart, keys 6 pt apart,
+        /// radius 8, no borders (`Theme.Metrics.letterKeyHeight` high).
         static let letters = Layout(
             columns: 40,
             rows: [
-                characterKeys("1234567890".map { (String($0), String($0)) }),
+                plainKeys("1234567890"),
                 letterKeys("qwertyuiop"),
-                letterKeys("asdfghjkl") + [.key(.enter, span: 4)],
-                letterKeys("zxcvbnm") + [.key(.space, span: 7), .key(.backspace, span: 5)],
+                [.gap(2)] + letterKeys("asdfghjkl") + [.gap(2)],
+                plainKeys("-/") + letterKeys("zxcvbnm") + [.key(.backspace, span: 4)],
+                [.key(.space, span: 30), .key(.enter, span: 10)],
             ],
+            rowGap: 10,
+            keyMargin: 3,
+            keyRadius: 8,
+            bordered: false,
+            caps: .system,
             spaceTalks: false,
             swipes: true
         )
     }
 
-    static let rowGap: CGFloat = 6
-    /// Each key's inset from its columns on either side.
-    static let keyMargin: CGFloat = 3
-    static let keyRadius: CGFloat = 12
     /// How far a finger may slide off its key before the key is cancelled.
     static let slop: CGFloat = 6
     /// The whole keyboard while the terminal is not running.
@@ -349,7 +382,7 @@ final class FullKeyBlockView: UIView {
     /// The block's height for a row height of `keyHeight`.
     static func height(keyHeight: CGFloat, layout: Layout) -> CGFloat {
         let rows = CGFloat(layout.rows.count)
-        return keyHeight * rows + rowGap * (rows - 1)
+        return keyHeight * rows + layout.rowGap * (rows - 1)
     }
 
     /// A key's place on the grid.
@@ -483,7 +516,7 @@ final class FullKeyBlockView: UIView {
         super.init(frame: .zero)
         isMultipleTouchEnabled = true
         backgroundColor = .clear
-        caps = slots.map { FullKeyCapView(key: $0.key, talks: layout.spaceTalks) }
+        caps = slots.map { FullKeyCapView(key: $0.key, layout: layout) }
         caps.forEach(addSubview)
         isAccessibilityElement = false
         accessibilityKeys = slots.indices.map { index in
@@ -506,9 +539,9 @@ final class FullKeyBlockView: UIView {
     private func keyFrame(_ slot: Slot) -> CGRect {
         let unit = bounds.width / layout.columns
         return CGRect(
-            x: CGFloat(slot.column) * unit + Self.keyMargin,
-            y: CGFloat(slot.row) * (keyHeight + Self.rowGap),
-            width: max(0, CGFloat(slot.span) * unit - Self.keyMargin * 2),
+            x: CGFloat(slot.column) * unit + layout.keyMargin,
+            y: CGFloat(slot.row) * (keyHeight + layout.rowGap),
+            width: max(0, CGFloat(slot.span) * unit - layout.keyMargin * 2),
             height: keyHeight
         )
     }
@@ -517,12 +550,12 @@ final class FullKeyBlockView: UIView {
     /// so a finger landing between two keys still presses one.
     private func touchArea(_ slot: Slot) -> CGRect {
         let unit = bounds.width / layout.columns
-        let top = CGFloat(slot.row) * (keyHeight + Self.rowGap) - Self.rowGap / 2
+        let top = CGFloat(slot.row) * (keyHeight + layout.rowGap) - layout.rowGap / 2
         return CGRect(
             x: CGFloat(slot.column) * unit,
             y: top,
             width: CGFloat(slot.span) * unit,
-            height: keyHeight + Self.rowGap
+            height: keyHeight + layout.rowGap
         )
     }
 
@@ -889,23 +922,30 @@ private final class FullKeyCapView: UIView {
     let key: FullKey
     /// Space talks when held: its cap shows the microphone and 按住说话.
     private let talks: Bool
+    /// The system keyboard's glyphs (the letter layer) instead of the Mac keyboard's.
+    private let systemCaps: Bool
     /// The key's glyph or word; on a number or symbol key, the unshifted character.
     private let main = UILabel()
     /// A number or symbol key's shifted character, above `main`.
     private let alternate = UILabel()
     /// The space key's microphone.
     private let icon = UIImageView()
+    /// Under a locked modifier's glyph.
+    private let lockBar = UIView()
 
-    /// A number or symbol key with a different shifted character (the letter layer's digits
-    /// have none).
+    /// A number or symbol key with a different shifted character (the letter layer's digits,
+    /// `-` and `/` have none).
     private var hasAlternate: Bool {
         switch key {
         case .character(let base, let shifted): base != shifted
         default: false
         }
     }
-    /// Under a locked modifier's glyph.
-    private let lockBar = UIView()
+
+    /// A letter's font; also a character key's without an alternate.
+    private var letterFont: UIFont {
+        systemCaps ? Theme.Fonts.LetterKeyboard.letter : Theme.Fonts.FullKeyboard.letter
+    }
 
     private static let input = UIColor(Theme.input)
     private static let function = UIColor(Theme.secondarySurface)
@@ -916,14 +956,15 @@ private final class FullKeyCapView: UIView {
     private static let primaryForeground = UIColor(Theme.primaryForeground)
     private static let microphone = UIColor(Theme.microphone)
 
-    init(key: FullKey, talks: Bool) {
+    init(key: FullKey, layout: FullKeyBlockView.Layout) {
         self.key = key
-        self.talks = talks
+        talks = layout.spaceTalks
+        systemCaps = layout.caps == .system
         super.init(frame: .zero)
         isUserInteractionEnabled = false
-        layer.cornerRadius = FullKeyBlockView.keyRadius
+        layer.cornerRadius = layout.keyRadius
         layer.cornerCurve = .continuous
-        layer.borderWidth = 1
+        layer.borderWidth = layout.bordered ? 1 : 0
         for label in [main, alternate] {
             label.textAlignment = .center
             label.adjustsFontSizeToFitWidth = true
@@ -942,7 +983,7 @@ private final class FullKeyCapView: UIView {
             alternate.isHidden = !hasAlternate
         case .space where !talks:
             main.text = "space"
-            main.font = Theme.Fonts.FullKeyboard.function
+            main.font = systemCaps ? Theme.Fonts.LetterKeyboard.space : Theme.Fonts.FullKeyboard.function
         case .space:
             icon.isHidden = false
             icon.image = UIImage(
@@ -959,7 +1000,7 @@ private final class FullKeyCapView: UIView {
             main.font = Theme.Fonts.FullKeyboard.function
         default:
             main.text = Self.glyph(key)
-            main.font = Theme.Fonts.FullKeyboard.symbol
+            main.font = systemCaps ? Theme.Fonts.LetterKeyboard.symbol : Theme.Fonts.FullKeyboard.symbol
         }
         apply()
     }
@@ -1020,11 +1061,12 @@ private final class FullKeyCapView: UIView {
         switch key {
         case .letter(let letter):
             main.text = state.shifted ? letter.uppercased() : letter
-            main.font = Theme.Fonts.FullKeyboard.letter
+            main.font = letterFont
         case .character(let base, _) where !hasAlternate:
-            // A digit of the letter layer: the digit alone, as large as the letters beside it.
+            // A digit, `-` or `/` of the letter layer: the character alone, as large as the
+            // letters beside it.
             main.text = base
-            main.font = Theme.Fonts.FullKeyboard.letter
+            main.font = letterFont
         case .character(let base, let shifted):
             // The shifted character stays above the base one; ⇧ swaps which one is large.
             alternate.text = shifted

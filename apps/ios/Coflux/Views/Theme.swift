@@ -88,6 +88,19 @@ enum Theme {
             /// The space key's 按住说话, mockup 13 pt
             static let hint = UIFont.systemFont(ofSize: 13, weight: .medium)
         }
+
+        /// The dock's letter layer (`FullKeyBlockView.Layout.letters`), drawn after the iOS
+        /// system keyboard: larger, lighter glyphs than the full keyboard's. Fixed sizes, like
+        /// `FullKeyboard`.
+        @MainActor
+        enum LetterKeyboard {
+            /// A letter, digit, `-` or `/`: the system keyboard's 22 pt regular
+            static let letter = UIFont.systemFont(ofSize: 22, weight: .regular)
+            /// ⌫ and ⏎, no heavier than the letters
+            static let symbol = UIFont.systemFont(ofSize: 20, weight: .regular)
+            /// The space key's word, small (drawn muted)
+            static let space = UIFont.systemFont(ofSize: 15, weight: .regular)
+        }
     }
 
     /// Shapes and sizes of the Duo redesign (mockup "布局规格").
@@ -97,6 +110,8 @@ enum Theme {
         /// Key caps: 40 pt high
         static let keyRadius: CGFloat = 13
         static let keyHeight: CGFloat = 40
+        /// The dock's letter layer keys: 42 pt high, as on the system keyboard
+        static let letterKeyHeight: CGFloat = 42
         /// The one-line composer card; it expands to a multi-line card while typing
         static let composerHeight: CGFloat = 56
         static let composerRadius: CGFloat = 28
