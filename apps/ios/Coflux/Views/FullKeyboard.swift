@@ -941,8 +941,8 @@ private final class FullKeyCapView: UIView {
     /// Under a locked modifier's glyph.
     private let lockBar = UIView()
 
-    /// A number or symbol key with a different shifted character (the letter layer's digits,
-    /// `-` and `/` have none).
+    /// A number or symbol key with a different shifted character (the letter layer's digits
+    /// and `/` have none).
     private var hasAlternate: Bool {
         switch key {
         case .character(let base, let shifted): base != shifted
@@ -1071,7 +1071,7 @@ private final class FullKeyCapView: UIView {
             main.text = state.shifted ? letter.uppercased() : letter
             main.font = letterFont
         case .character(let base, _) where !hasAlternate:
-            // A digit, `-` or `/` of the letter layer: the character alone, as large as the
+            // A digit or `/` of the letter layer: the character alone, as large as the
             // letters beside it.
             main.text = base
             main.font = letterFont
