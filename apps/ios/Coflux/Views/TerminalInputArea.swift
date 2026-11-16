@@ -337,10 +337,11 @@ struct TerminalInputArea: View {
     let task: Coflux_V1_Task?
     /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
     var bottomGap: CGFloat = 8
-    /// The rail beside the dock, as the page's leading and trailing safe-area insets (zero
-    /// without a rail): the letter layer reaches under it, across the whole window, like the
-    /// system keyboard. The quick layer stays beside it. The host reads them from the page,
-    /// which reaches the window's edges; the dock itself sits inside them and would read zero.
+    /// The rail beside the dock, as the page's leading and trailing safe-area insets where they
+    /// are the rail (zero elsewhere, and on a side that is a sidebar): the letter layer reaches
+    /// under it, across the whole window, like the system keyboard. The quick layer stays beside
+    /// it. The host reads and filters them (`railReach`) from the page, which reaches the
+    /// window's edges; the dock itself sits inside them and would read zero.
     var railInsets = EdgeInsets()
     /// How far the letter layer is out: 0 (quick layer) … `letterLift` (letter layer).
     var keypadReveal: CGFloat = 0
@@ -412,7 +413,7 @@ struct TerminalInputArea: View {
         .frame(height: Self.quickRowsHeight + Self.topPadding + bottomGap + max(0, keypadReveal), alignment: .bottom)
         // Clipped to the dock's height, so the letter layer shows only as far as the dock has
         // grown; open sideways by the rail, so the letter layer can run under it.
-        .clipShape(SidewaysOpenRectangle(overhang: max(railInsets.leading, railInsets.trailing)))
+        .clipShape(SidewaysOpenRectangle(leading: railInsets.leading, trailing: railInsets.trailing))
         .background(Theme.terminal)
         // From static row metrics, so it never feeds back (see `letterLift`).
         .onAppear { onKeypadHeight(lift) }
@@ -642,13 +643,20 @@ struct TerminalInputArea: View {
     }
 }
 
-/// The bounds, widened by `overhang` on both sides: a clip that keeps its top and bottom but lets
-/// the dock's letter layer run under the rail beside it. With no overhang it is `clipped()`.
+/// The bounds, widened by `leading` and `trailing` on those sides: a clip that keeps its top and
+/// bottom but lets the dock's letter layer run under the rail beside it, and only there. With no
+/// widening it is `clipped()`. Leading is the left edge: the app lays out left to right.
 struct SidewaysOpenRectangle: Shape {
-    var overhang: CGFloat
+    var leading: CGFloat
+    var trailing: CGFloat
 
     func path(in rect: CGRect) -> Path {
-        Path(rect.insetBy(dx: -overhang, dy: 0))
+        Path(CGRect(
+            x: rect.minX - leading,
+            y: rect.minY,
+            width: rect.width + leading + trailing,
+            height: rect.height
+        ))
     }
 }
 

@@ -59,6 +59,21 @@ struct WorkspaceDetailView: View {
     private var railInset: CGFloat {
         max(sideInsets.leading, sideInsets.trailing)
     }
+    /// The widest side inset that can be the rail: it measures about 70–90 pt on the Duo, a
+    /// sidebar 260 pt or more.
+    static let widestRail: CGFloat = 120
+    /// How far the dock's letter layer runs past the page's sides, and the page's clip opens:
+    /// each side's inset only where it is the rail. The split view's detail column has the
+    /// sidebar's width as its leading inset; reaching into that hid the letter layer's left
+    /// keys behind the sidebar (seen on the Duo), so a side wider than `widestRail` is left
+    /// alone. Nothing without a rail.
+    private var railReach: EdgeInsets {
+        guard barsOnRail else { return EdgeInsets() }
+        func rail(_ inset: CGFloat) -> CGFloat {
+            inset <= Self.widestRail ? inset : 0
+        }
+        return EdgeInsets(top: 0, leading: rail(sideInsets.leading), bottom: 0, trailing: rail(sideInsets.trailing))
+    }
     /// The page's size pinned while the compose layer is up (see `base`).
     @State private var frozenPageSize: CGSize?
 
@@ -340,7 +355,7 @@ struct WorkspaceDetailView: View {
             }
             // Open sideways by the rail's width, so the dock's letter layer can run under the
             // rail; everything else here stays inside (the pager clips itself).
-            .clipShape(SidewaysOpenRectangle(overhang: barsOnRail ? railInset : 0))
+            .clipShape(SidewaysOpenRectangle(leading: railReach.leading, trailing: railReach.trailing))
             // With the bars on the rail nothing is drawn across the top or the bottom (status,
             // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
             // the title row and the keys take them.
@@ -684,7 +699,7 @@ struct WorkspaceDetailView: View {
             client: client,
             task: activeTask,
             bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
-            railInsets: barsOnRail ? sideInsets : EdgeInsets(),
+            railInsets: railReach,
             keypadReveal: keypadReveal,
             onKeypadHeight: { keypadHeight = $0 },
             onRestingHeight: { restingDockHeight = $0 },
