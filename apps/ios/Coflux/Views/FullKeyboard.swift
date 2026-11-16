@@ -899,7 +899,10 @@ private final class FullKeyCapView: UIView {
     /// A number or symbol key with a different shifted character (the letter layer's digits
     /// have none).
     private var hasAlternate: Bool {
-        if case .character(let base, let shifted) = key { base != shifted } else { false }
+        switch key {
+        case .character(let base, let shifted): base != shifted
+        default: false
+        }
     }
     /// Under a locked modifier's glyph.
     private let lockBar = UIView()

@@ -46,10 +46,11 @@ struct WorkspaceDetailView: View {
     @State private var dictationStage: DictationStage = .listening
     /// 逐任务离底态（plan 056）：true = 在底部。未上报（无输出/未滚动）视为在底
     @State private var atBottomByTask: [String: Bool] = [:]
-    /// The dock's resting height (handle + key row, never the notice bar or the keypad): the
-    /// terminal ends above it, so neither the notice bar nor the keyboard resizes the terminal (D13).
+    /// The dock's resting height (the quick key rows, never the notice bar or the letter layer):
+    /// the terminal ends above it, so neither the notice bar nor the keyboard resizes the terminal
+    /// (D13).
     @State private var restingDockHeight: CGFloat = 0
-    /// The page's content size: decides the short-window fold and where the toolbar items go.
+    /// The page's content size: decides where the toolbar items go.
     @State private var pageSize: CGSize = .zero
     /// The page's widest side safe-area inset: the system's rail, when it draws one.
     @State private var railInset: CGFloat = 0
@@ -58,14 +59,13 @@ struct WorkspaceDetailView: View {
 
     /// The size the page lays out at: pinned while composing, otherwise the live one.
     private var laidOutSize: CGSize { frozenPageSize ?? pageSize }
-    /// The keypad as a sheet (short windows only).
-    @State private var showingKeypad = false
-    /// The full keypad pulled out below the key row: how much of it shows (follows the finger,
-    /// then animates open or shut). The terminal never resizes for it — it is pushed up by the
-    /// same amount, so its bottom rows (where agents and prompts live) stay just above the keypad
-    /// and the PTY is never reflowed (user's call, 2026-11-08: no resize after the drag). The
-    /// price: the top rows of a top-anchored screen (a fresh shell, vim) sit out of view while the
-    /// keypad is open.
+    /// The dock's letter layer, swapped in for the quick rows by a swipe up: how much taller than
+    /// the resting dock the dock is (follows the finger, then animates open or shut), up to
+    /// `keypadHeight`, the letter layer's extra height. The terminal never resizes for it — it is
+    /// pushed up by the same amount, so its bottom rows (where agents and prompts live) stay just
+    /// above the dock and the PTY is never reflowed (user's call, 2026-11-08: no resize after the
+    /// drag). The price: the top rows of a top-anchored screen (a fresh shell, vim) sit out of
+    /// view while the letter layer is out.
     @State private var keypadHeight: CGFloat = 0
     @State private var keypadReveal: CGFloat = 0
     /// keypadReveal when the current drag began; nil while no drag runs.
@@ -85,10 +85,6 @@ struct WorkspaceDetailView: View {
     @State private var laptopPose = false
     /// The list of every terminal, opened from the active avatar.
     @State private var showingTerminalList = false
-
-    /// Below this content height the key row folds into 按键 and only the composer stays
-    /// (tall Split View, outer display in landscape): the terminal keeps its rows.
-    static let shortPageHeight: CGFloat = 470
 
     private var activeTaskID: String? {
         get { navigation.activeTaskID(in: workspace.id) }
@@ -110,10 +106,6 @@ struct WorkspaceDetailView: View {
 
     private var activeTask: Coflux_V1_Task? {
         members.first { $0.id == activeTaskID }
-    }
-
-    private var shortWindow: Bool {
-        layout != .tall && laidOutSize.height > 0 && laidOutSize.height < Self.shortPageHeight
     }
 
     /// 附件 / 按键 go to the bottom bar (the lower end of the rail on the outer display and in the
@@ -255,19 +247,6 @@ struct WorkspaceDetailView: View {
                 railInset = inset
             }
             .animation(.easeOut(duration: 0.15), value: dictationOverlayVisible)
-            .sheet(isPresented: $showingKeypad) {
-                TerminalExtraKeys(client: client, task: activeTask)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 24)
-                    .padding(.bottom, 8)
-                    // A short window's extra keys: a low panel that leaves the terminal and the
-                    // quick rows usable and stays open while keys are pressed.
-                    .presentationDetents([.height(150)])
-                    .presentationBackgroundInteraction(.enabled(upThrough: .height(150)))
-                    .presentationBackground(Theme.card)
-                    .presentationCornerRadius(34)
-                    .presentationDragIndicator(.visible)
-            }
             .sheet(isPresented: $showingPhotoPicker) {
                 PhotoPicker(isPresented: $showingPhotoPicker) { data, typeIdentifier in
                     keySender.uploadImage(data: data, typeIdentifier: typeIdentifier, prefix: "photo")
@@ -296,11 +275,6 @@ struct WorkspaceDetailView: View {
                 }
                 claims.attach(ownership)
                 claimTerminals(activating: activeTaskID)
-            }
-            // An open keypad whose height changed (a wider window adds ← →): follow it.
-            .onChange(of: keypadHeight) { old, height in
-                guard keypadDragStart == nil, old > 0, keypadReveal == old else { return }
-                keypadReveal = height
             }
             // Activating a terminal (swipe, list, card, sidebar) takes it from another window.
             .onChange(of: activeTaskID) { _, id in
@@ -340,11 +314,11 @@ struct WorkspaceDetailView: View {
             ZStack(alignment: .top) {
                 ZStack(alignment: .bottom) {
                     terminalColumn(reserveDock: true)
-                    dock(inlineKeypad: false)
+                    dock
                 }
                 .padding(.top, barsOnRail ? Self.railTitleHeight : 0)
                 // With the bars on the rail the title row is the page's own: the name on the
-                // left, the avatars on the right, over the terminal the keypad pushes up.
+                // left, the avatars on the right, over the terminal the letter layer pushes up.
                 if barsOnRail {
                     HStack(spacing: 12) {
                         pageTitle
@@ -602,7 +576,7 @@ struct WorkspaceDetailView: View {
     }
 
     /// Status strip + the pager. With `reserveDock` the terminal ends above the resting dock and
-    /// rides up with the keypad.
+    /// rides up with the dock's letter layer.
     private func terminalColumn(reserveDock: Bool) -> some View {
         pager
             // Floating over the terminal's bottom rows, never below them: a banner that comes and
@@ -640,7 +614,7 @@ struct WorkspaceDetailView: View {
                 }
             }
             .padding(.bottom, reserveDock ? restingDockHeight : 0)
-        // The tall layout has no keypad to pull out.
+        // The tall layout has no letter layer to swap in.
         .offset(y: reserveDock && layout != .tall ? -keypadReveal : 0)
     }
 
@@ -697,17 +671,14 @@ struct WorkspaceDetailView: View {
         .ignoresSafeArea(.keyboard)
     }
 
-    private func dock(inlineKeypad: Bool) -> some View {
+    private var dock: some View {
         TerminalInputArea(
             client: client,
             task: activeTask,
-            inlineKeypad: inlineKeypad,
             bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
-            keypadReveal: inlineKeypad ? 0 : keypadReveal,
+            keypadReveal: keypadReveal,
             onKeypadHeight: { keypadHeight = $0 },
-            onRestingHeight: { height in
-                if !inlineKeypad { restingDockHeight = height }
-            },
+            onRestingHeight: { restingDockHeight = $0 },
             onKeypadDrag: { keypadDragChanged($0) },
             onKeypadDragEnd: { keypadDragEnded($0) },
             onKeypadToggle: { toggleKeypad() },
@@ -865,17 +836,18 @@ struct WorkspaceDetailView: View {
         }
     }
 
-    // MARK: - Pulling the keypad out
+    // MARK: - Swapping in the letter layer
 
-    /// The finger moved: the keys follow it 1:1 from where the drag was recognised (no jump by
-    /// the gesture's minimum distance), and past either end they give with a rubber band.
+    /// The finger moved, over either of the dock's layers: the dock follows it 1:1 from where the
+    /// drag was recognised (no jump by the gesture's minimum distance), and past either end it
+    /// gives with a rubber band.
     private func keypadDragChanged(_ translation: CGFloat) {
         // While talking the finger slides over the dock onto 发送 / 取消: not a keypad drag.
         if dictationOverlayVisible {
             if keypadDragStart != nil { setKeypad(open: keypadReveal > keypadHeight / 2) }
             return
         }
-        guard !shortWindow, keypadHeight > 0 else { return }
+        guard keypadHeight > 0 else { return }
         if keypadDragStart == nil {
             keypadDragStart = keypadReveal
             keypadDragAnchor = translation
@@ -885,7 +857,7 @@ struct WorkspaceDetailView: View {
     }
 
     /// Inside 0…limit unchanged; beyond it the excess is damped like UIScrollView's bounce. Below
-    /// 0 the keys cannot shrink further, so the overshoot is simply held at 0.
+    /// 0 the dock cannot shrink further, so the overshoot is simply held at 0.
     private static func rubberBand(_ value: CGFloat, limit: CGFloat) -> CGFloat {
         if value <= 0 { return 0 }
         guard value > limit else { return value }
@@ -895,14 +867,10 @@ struct WorkspaceDetailView: View {
     }
 
     /// Released: a clear flick or pull settles in its direction, however short (a small swipe down
-    /// must collapse — needing half the keypad's height made it feel ignored); a hesitant release
-    /// settles by where the keypad is. A short window has no room below the terminal, so an
-    /// upward flick opens the keypad as a sheet there.
+    /// must swap back — needing half the letter layer's extra height made it feel ignored); a
+    /// hesitant release settles by where the dock is. Short windows too: the terminal rides up
+    /// rather than resizing, whatever the window's height.
     private func keypadDragEnded(_ predictedTranslation: CGFloat) {
-        if shortWindow {
-            if predictedTranslation < -24, !dictationOverlayVisible { showingKeypad = true }
-            return
-        }
         guard keypadDragStart != nil else { return }
         keypadDragStart = nil
         let open: Bool
@@ -916,16 +884,12 @@ struct WorkspaceDetailView: View {
         setKeypad(open: open)
     }
 
-    /// The handle's tap.
+    /// VoiceOver's action: swaps to the other layer.
     private func toggleKeypad() {
-        if shortWindow {
-            showingKeypad = true
-        } else {
-            setKeypad(open: keypadReveal < keypadHeight / 2)
-        }
+        setKeypad(open: keypadReveal < keypadHeight / 2)
     }
 
-    /// Animates the keypad open or shut with a little spring; the terminal rides along.
+    /// Animates the letter layer in or out with a little spring; the terminal rides along.
     private func setKeypad(open: Bool) {
         keypadDragStart = nil
         withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
