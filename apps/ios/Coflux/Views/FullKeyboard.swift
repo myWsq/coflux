@@ -339,7 +339,7 @@ final class FullKeyBlockView: UIView {
         ///     1  2  3  4  5  6  7  8  9  0
         ///     q  w  e  r  t  y  u  i  o  p
         ///       a  s  d  f  g  h  j  k  l        indented half a key each side
-        ///     -  /  z  x  c  v  b  n  m  ⌫
+        ///     - / z  x  c  v  b  n  m  ⌫         - and / 3 columns each, ⌫ 6: z under s
         ///     [          space          ][ ⏎ ]   30 and 10 columns
         ///
         /// Digits, `-` and `/` are character keys without a shifted alternate: there is no ⇧
@@ -351,7 +351,9 @@ final class FullKeyBlockView: UIView {
                 plainKeys("1234567890"),
                 letterKeys("qwertyuiop"),
                 [.gap(2)] + letterKeys("asdfghjkl") + [.gap(2)],
-                plainKeys("-/") + letterKeys("zxcvbnm") + [.key(.backspace, span: 4)],
+                // z under s, as on iOS: `-` and `/` take 3 columns each, ⌫ the 6 left over.
+                [.key(.character(base: "-", shifted: "-"), span: 3), .key(.character(base: "/", shifted: "/"), span: 3)]
+                    + letterKeys("zxcvbnm") + [.key(.backspace, span: 6)],
                 [.key(.space, span: 30), .key(.enter, span: 10)],
             ],
             rowGap: 10,
