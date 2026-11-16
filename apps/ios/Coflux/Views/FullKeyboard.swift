@@ -339,22 +339,26 @@ final class FullKeyBlockView: UIView {
         ///     1  2  3  4  5  6  7  8  9  0
         ///     q  w  e  r  t  y  u  i  o  p
         ///       a  s  d  f  g  h  j  k  l        indented half a key each side
-        ///     - / z  x  c  v  b  n  m  ⌫         - and / 3 columns each, ⌫ 6: z under s
-        ///     [          space          ][ ⏎ ]   30 and 10 columns
+        ///     /  z  x  c  v  b  n  m  ⌫          / and ⌫ 6 columns each: z under s
+        ///     ctrl ⌥ [     space     ][ ⏎ ]      5, 5, 20 and 10 columns
         ///
-        /// Digits, `-` and `/` are character keys without a shifted alternate: there is no ⇧
-        /// here, and their caps show the character alone. Rows 10 pt apart, keys 6 pt apart,
-        /// radius 8, no borders (`Theme.Metrics.letterKeyHeight` high).
+        /// Digits and `/` are character keys without a shifted alternate: there is no ⇧ or ⇪
+        /// here, and their caps show the character alone. ctrl and ⌥ are the Mac layout's
+        /// modifiers, latched and held the same way. Rows 10 pt apart, keys 6 pt apart, radius 8,
+        /// no borders (`Theme.Metrics.letterKeyHeight` high).
         static let letters = Layout(
             columns: 40,
             rows: [
                 plainKeys("1234567890"),
                 letterKeys("qwertyuiop"),
                 [.gap(2)] + letterKeys("asdfghjkl") + [.gap(2)],
-                // z under s, as on iOS: `-` and `/` take 3 columns each, ⌫ the 6 left over.
-                [.key(.character(base: "-", shifted: "-"), span: 3), .key(.character(base: "/", shifted: "/"), span: 3)]
-                    + letterKeys("zxcvbnm") + [.key(.backspace, span: 6)],
-                [.key(.space, span: 30), .key(.enter, span: 10)],
+                // z under s, as on iOS: `/` and ⌫ take 6 columns each.
+                [.key(.character(base: "/", shifted: "/"), span: 6)] + letterKeys("zxcvbnm")
+                    + [.key(.backspace, span: 6)],
+                [
+                    .key(.modifier(.control), span: 5), .key(.modifier(.option), span: 5),
+                    .key(.space, span: 20), .key(.enter, span: 10),
+                ],
             ],
             rowGap: 10,
             keyMargin: 3,
@@ -691,7 +695,9 @@ final class FullKeyBlockView: UIView {
                 return false
             }
             swipe.recognised = true
-            // Its key sends nothing, stops repeating and shows unpressed.
+            // Its key sends nothing, stops repeating and shows unpressed. A modifier's hold drops
+            // with it (a cancelled finger is never held) and lifting it latches nothing, so a
+            // swipe begun on ctrl or ⌥ never leaves the modifier stuck.
             if let entry = tracked[ObjectIdentifier(touch)] { cancel(entry) }
         }
         advance(&swipe, to: touch)
@@ -999,7 +1005,7 @@ private final class FullKeyCapView: UIView {
             main.font = Theme.Fonts.FullKeyboard.function
         case .modifier(.control):
             main.text = "ctrl"
-            main.font = Theme.Fonts.FullKeyboard.function
+            main.font = systemCaps ? Theme.Fonts.LetterKeyboard.function : Theme.Fonts.FullKeyboard.function
         default:
             main.text = Self.glyph(key)
             main.font = systemCaps ? Theme.Fonts.LetterKeyboard.symbol : Theme.Fonts.FullKeyboard.symbol

@@ -94,10 +94,12 @@ enum Theme {
         /// `FullKeyboard`.
         @MainActor
         enum LetterKeyboard {
-            /// A letter, digit, `-` or `/`: the system keyboard's 22 pt regular
+            /// A letter, digit or `/`: the system keyboard's 22 pt regular
             static let letter = UIFont.systemFont(ofSize: 22, weight: .regular)
-            /// ⌫ and ⏎, no heavier than the letters
+            /// ⌫, ⏎ and ⌥, no heavier than the letters
             static let symbol = UIFont.systemFont(ofSize: 20, weight: .regular)
+            /// A worded function key (ctrl), like the system keyboard's 123 key
+            static let function = UIFont.systemFont(ofSize: 16, weight: .regular)
             /// The space key's word, small (drawn muted)
             static let space = UIFont.systemFont(ofSize: 15, weight: .regular)
         }
