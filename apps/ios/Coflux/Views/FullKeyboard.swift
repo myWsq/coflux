@@ -62,6 +62,7 @@ struct FullTerminalKeyboard: View {
         VStack(spacing: FullKeyBlockView.rowGap) {
             claudeRow
             FullKeyBlock(
+                layout: .mac,
                 sender: sender,
                 keyHeight: keyHeight,
                 onDictatePrewarm: onDictatePrewarm,
@@ -70,7 +71,7 @@ struct FullTerminalKeyboard: View {
                 onDictateEnd: onDictateEnd,
                 onDictateAbort: onDictateAbort
             )
-            .frame(height: FullKeyBlockView.height(keyHeight: keyHeight))
+            .frame(height: FullKeyBlockView.height(keyHeight: keyHeight, layout: .mac))
         }
         .padding(.horizontal, TerminalInputArea.sideInset)
         .padding(.top, Self.topPadding)
@@ -95,7 +96,7 @@ struct FullTerminalKeyboard: View {
         // The unit comes from the width offered, never from a measurement of the keys (the
         // layout loop noted in `TerminalInputArea.keyRows`).
         return GeometryReader { proxy in
-            let unit = proxy.size.width / FullKeyBlockView.columns
+            let unit = proxy.size.width / FullKeyBlockView.Layout.mac.columns
             HStack(spacing: 0) {
                 slot(7, unit: unit) {
                     TerminalKey(sender: sender, label: "esc", height: height, functionSurface: true) { "\u{1b}" }
@@ -158,18 +159,26 @@ struct FullTerminalKeyboard: View {
 
 // MARK: - The key block (SwiftUI wrapper)
 
-/// `FullKeyBlockView` in SwiftUI: wires its presses to the active terminal.
-private struct FullKeyBlock: UIViewRepresentable {
+/// `FullKeyBlockView` in SwiftUI: wires its presses to the active terminal. The tall layout's
+/// keyboard uses the Mac layout, whose space talks; the dock's letter layer uses the letter
+/// layout, whose vertical swipe reports through `onSwipe` / `onSwipeEnd`. The layout is fixed
+/// when the view is made.
+struct FullKeyBlock: UIViewRepresentable {
+    let layout: FullKeyBlockView.Layout
     let sender: TerminalKeySender
     let keyHeight: CGFloat
-    let onDictatePrewarm: () -> Void
-    let onDictateBegin: () -> Void
-    let onDictateMove: (CGPoint) -> Void
-    let onDictateEnd: () -> Void
-    let onDictateAbort: () -> Void
+    var onDictatePrewarm: () -> Void = {}
+    var onDictateBegin: () -> Void = {}
+    var onDictateMove: (CGPoint) -> Void = { _ in }
+    var onDictateEnd: () -> Void = {}
+    var onDictateAbort: () -> Void = {}
+    /// The swipe's vertical translation so far, in global coordinates (`Layout.swipes` only).
+    var onSwipe: (CGFloat) -> Void = { _ in }
+    /// The swipe ended or was cancelled: its predicted final translation.
+    var onSwipeEnd: (CGFloat) -> Void = { _ in }
 
     func makeUIView(context: Context) -> FullKeyBlockView {
-        FullKeyBlockView()
+        FullKeyBlockView(layout: layout)
     }
 
     func updateUIView(_ view: FullKeyBlockView, context: Context) {
@@ -184,6 +193,8 @@ private struct FullKeyBlock: UIViewRepresentable {
         view.onDictateMove = onDictateMove
         view.onDictateEnd = onDictateEnd
         view.onDictateAbort = onDictateAbort
+        view.onSwipe = onSwipe
+        view.onSwipeEnd = onSwipeEnd
     }
 
     static func dismantleUIView(_ view: FullKeyBlockView, coordinator: ()) {
@@ -217,15 +228,10 @@ private struct FullKeyBlock: UIViewRepresentable {
 
 // MARK: - The key block (UIKit touch surface)
 
-/// The keyboard's five Mac rows as one multi-touch surface (D3): it lays the keys out on a grid of
-/// 58 columns and follows every finger itself, so a modifier held by one finger applies to a key
-/// tapped by another, as on a hardware keyboard.
-///
-///     ` 1 2 3 4 5 6 7 8 9 0 - = ⌫
-///     tab q w e r t y u i o p [ ] \
-///     ⇪ a s d f g h j k l ; ' ⏎
-///     ⇧ z x c v b n m , . / ↑
-///     ctrl ⌥ space ← ↓ →
+/// Rows of keys as one multi-touch surface (D3): it lays the keys of its `Layout` out on a grid of
+/// columns and follows every finger itself, so a modifier held by one finger applies to a key
+/// tapped by another, as on a hardware keyboard. The Mac layout is the tall layout's keyboard; the
+/// letter layout is the dock's letter layer.
 ///
 /// - A key sends on release, once. A finger that slides more than 6 pt off its key cancels it;
 ///   a modifier stays held wherever the finger goes.
@@ -235,12 +241,92 @@ private struct FullKeyBlock: UIViewRepresentable {
 ///   off. A key sent while a modifier is held applies it and uses that hold, and lifting a used
 ///   hold leaves the modifier as it was. Every key sent clears the once modifiers. ⇪ toggles ⇧
 ///   between off and locked.
-/// - Space (D6): a tap types a space; held for 0.33 s the microphone prewarms, held for 0.45 s
-///   talking begins and the finger's window position streams to the dictation overlay. While
-///   talking every other finger is ignored.
+/// - Space (D6), where the layout talks: a tap types a space; held for 0.33 s the microphone
+///   prewarms, held for 0.45 s talking begins and the finger's window position streams to the
+///   dictation overlay. While talking every other finger is ignored. Elsewhere space only types.
+/// - Swipe, where the layout swipes: a finger alone on the surface that moves more than 10 pt,
+///   mainly vertically, becomes a swipe of the whole surface. Its key is cancelled (nothing is
+///   sent, nothing repeats) and from then on its vertical translation goes to `onSwipe`, and its
+///   predicted end to `onSwipeEnd` when it lifts or is cancelled.
 final class FullKeyBlockView: UIView {
-    /// The grid's width in columns: a letter key takes 4.
-    static let columns: CGFloat = 58
+    /// The keys a block lays out, and how it behaves.
+    struct Layout {
+        /// A row item: a key and its width in columns, or an empty span.
+        fileprivate enum Item {
+            case key(FullKey, span: Int)
+            case gap(Int)
+        }
+
+        /// The grid's width in columns.
+        let columns: CGFloat
+        fileprivate let rows: [[Item]]
+        /// Space held talks (D6); otherwise it only types a space.
+        let spaceTalks: Bool
+        /// A vertical swipe of one finger moves the surface's host (the dock's letter layer).
+        let swipes: Bool
+
+        private static func characterKeys(_ pairs: [(String, String)]) -> [Item] {
+            pairs.map { .key(.character(base: $0.0, shifted: $0.1), span: 4) }
+        }
+
+        private static func letterKeys(_ letters: String) -> [Item] {
+            letters.map { .key(.letter(String($0)), span: 4) }
+        }
+
+        /// The tall layout's five Mac rows, on 58 columns (a letter key takes 4):
+        ///
+        ///     ` 1 2 3 4 5 6 7 8 9 0 - = ⌫
+        ///     tab q w e r t y u i o p [ ] \
+        ///     ⇪ a s d f g h j k l ; ' ⏎
+        ///     ⇧ z x c v b n m , . / ↑
+        ///     ctrl ⌥ space ← ↓ →
+        static let mac = Layout(
+            columns: 58,
+            rows: [
+                characterKeys([
+                    ("`", "~"), ("1", "!"), ("2", "@"), ("3", "#"), ("4", "$"), ("5", "%"), ("6", "^"),
+                    ("7", "&"), ("8", "*"), ("9", "("), ("0", ")"), ("-", "_"), ("=", "+"),
+                ]) + [.key(.backspace, span: 6)],
+                [.key(.tab, span: 6)] + letterKeys("qwertyuiop")
+                    + characterKeys([("[", "{"), ("]", "}"), ("\\", "|")]),
+                [.key(.capsLock, span: 7)] + letterKeys("asdfghjkl") + characterKeys([(";", ":"), ("'", "\"")])
+                    + [.key(.enter, span: 7)],
+                // ↑ straight above ↓; no right ⇧, so the corner above → stays empty (mockup).
+                [.key(.modifier(.shift), span: 8)] + letterKeys("zxcvbnm")
+                    + characterKeys([(",", "<"), (".", ">"), ("/", "?")])
+                    + [.key(.arrow(.up), span: 5), .gap(5)],
+                // Space centred on the board: 15 columns either side of it.
+                [
+                    .key(.modifier(.control), span: 8), .key(.modifier(.option), span: 7), .key(.space, span: 28),
+                    .key(.arrow(.left), span: 5), .key(.arrow(.down), span: 5), .key(.arrow(.right), span: 5),
+                ],
+            ],
+            spaceTalks: true,
+            swipes: false
+        )
+
+        /// The dock's letter layer, lower case only, on 40 columns (a key takes 4):
+        ///
+        ///     1 2 3 4 5 6 7 8 9 0
+        ///     q w e r t y u i o p
+        ///     a s d f g h j k l ⏎
+        ///     z x c v b n m ␣ ⌫
+        ///
+        /// A digit is a character key without a shifted alternate (the same character both ways):
+        /// there is no ⇧ here, and its cap shows the digit alone.
+        static let letters = Layout(
+            columns: 40,
+            rows: [
+                characterKeys("1234567890".map { (String($0), String($0)) }),
+                letterKeys("qwertyuiop"),
+                letterKeys("asdfghjkl") + [.key(.enter, span: 4)],
+                letterKeys("zxcvbnm") + [.key(.space, span: 7), .key(.backspace, span: 5)],
+            ],
+            spaceTalks: false,
+            swipes: true
+        )
+    }
+
     static let rowGap: CGFloat = 6
     /// Each key's inset from its columns on either side.
     static let keyMargin: CGFloat = 3
@@ -256,43 +342,15 @@ final class FullKeyBlockView: UIView {
     static let prewarmDelay: Duration = .milliseconds(330)
     static let talkDelay: Duration = .milliseconds(450)
 
+    /// A finger alone on a swiping layout that moves this far, mainly vertically, becomes a
+    /// swipe: the dock's drag threshold (its `minimumDistance`, and `RepeatKey`'s slop).
+    static let swipeThreshold: CGFloat = 10
+
     /// The block's height for a row height of `keyHeight`.
-    static func height(keyHeight: CGFloat) -> CGFloat {
-        keyHeight * CGFloat(rows.count) + rowGap * CGFloat(rows.count - 1)
+    static func height(keyHeight: CGFloat, layout: Layout) -> CGFloat {
+        let rows = CGFloat(layout.rows.count)
+        return keyHeight * rows + rowGap * (rows - 1)
     }
-
-    /// A row item: a key and its width in columns, or an empty span.
-    private enum Item {
-        case key(FullKey, span: Int)
-        case gap(Int)
-    }
-
-    private static func characters(_ pairs: [(String, String)]) -> [Item] {
-        pairs.map { .key(.character(base: $0.0, shifted: $0.1), span: 4) }
-    }
-
-    private static func letters(_ letters: String) -> [Item] {
-        letters.map { .key(.letter(String($0)), span: 4) }
-    }
-
-    private static let rows: [[Item]] = [
-        characters([
-            ("`", "~"), ("1", "!"), ("2", "@"), ("3", "#"), ("4", "$"), ("5", "%"), ("6", "^"),
-            ("7", "&"), ("8", "*"), ("9", "("), ("0", ")"), ("-", "_"), ("=", "+"),
-        ]) + [.key(.backspace, span: 6)],
-        [.key(.tab, span: 6)] + letters("qwertyuiop") + characters([("[", "{"), ("]", "}"), ("\\", "|")]),
-        [.key(.capsLock, span: 7)] + letters("asdfghjkl") + characters([(";", ":"), ("'", "\"")])
-            + [.key(.enter, span: 7)],
-        // ↑ straight above ↓; no right ⇧, so the corner above → stays empty (mockup).
-        [.key(.modifier(.shift), span: 8)] + letters("zxcvbnm")
-            + characters([(",", "<"), (".", ">"), ("/", "?")])
-            + [.key(.arrow(.up), span: 5), .gap(5)],
-        // Space centred on the board: 15 columns either side of it.
-        [
-            .key(.modifier(.control), span: 8), .key(.modifier(.option), span: 7), .key(.space, span: 28),
-            .key(.arrow(.left), span: 5), .key(.arrow(.down), span: 5), .key(.arrow(.right), span: 5),
-        ],
-    ]
 
     /// A key's place on the grid.
     private struct Slot {
@@ -302,20 +360,22 @@ final class FullKeyBlockView: UIView {
         let span: Int
     }
 
-    private static let slots: [Slot] = rows.enumerated().flatMap { entry -> [Slot] in
-        let (row, items) = entry
-        var column = 0
-        var slots: [Slot] = []
-        for item in items {
-            switch item {
-            case .key(let key, let span):
-                slots.append(Slot(key: key, row: row, column: column, span: span))
-                column += span
-            case .gap(let span):
-                column += span
+    private static func slots(of layout: Layout) -> [Slot] {
+        layout.rows.enumerated().flatMap { entry -> [Slot] in
+            let (row, items) = entry
+            var column = 0
+            var slots: [Slot] = []
+            for item in items {
+                switch item {
+                case .key(let key, let span):
+                    slots.append(Slot(key: key, row: row, column: column, span: span))
+                    column += span
+                case .gap(let span):
+                    column += span
+                }
             }
+            return slots
         }
-        return slots
     }
 
     /// The modifier state of D7, apart from holding.
@@ -376,23 +436,57 @@ final class FullKeyBlockView: UIView {
     var onDictateMove: (CGPoint) -> Void = { _ in }
     var onDictateEnd: () -> Void = {}
     var onDictateAbort: () -> Void = {}
+    /// A swipe's vertical translation in window coordinates, from where its finger came down.
+    var onSwipe: (CGFloat) -> Void = { _ in }
+    /// A swipe lifted or was cancelled: its predicted final translation.
+    var onSwipeEnd: (CGFloat) -> Void = { _ in }
 
     // MARK: State
 
+    private let layout: Layout
+    private let slots: [Slot]
     private var caps: [FullKeyCapView] = []
     private var accessibilityKeys: [FullKeyAccessibilityElement] = []
     private var tracked: [ObjectIdentifier: TrackedTouch] = [:]
     private var latches: [FullKeyModifier: Latch] = [:]
     private var lastTap: [FullKeyModifier: TimeInterval] = [:]
+    /// Every finger on the block, on a key or not: a swipe needs a finger alone.
+    private var fingers: Set<ObjectIdentifier> = []
+    /// The finger that may become, or has become, a swipe (`Layout.swipes` only).
+    private var swipe: Swipe?
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    /// A finger followed as a possible swipe.
+    private struct Swipe {
+        let touch: ObjectIdentifier
+        /// Where the finger came down, in window coordinates.
+        let start: CGPoint
+        /// Past the threshold and mainly vertical: the finger drives the host, not a key.
+        var recognised = false
+        /// The vertical translation from `start`.
+        var translation: CGFloat = 0
+        /// The vertical speed in points per second, smoothed over the latest moves.
+        var velocity: CGFloat = 0
+        var timestamp: TimeInterval
+
+        /// How far ahead the last speed is projected for the predicted end, so a short flick
+        /// carries on in its direction.
+        static let projection: TimeInterval = 0.2
+
+        var predictedEnd: CGFloat {
+            translation + velocity * Self.projection
+        }
+    }
+
+    init(layout: Layout) {
+        self.layout = layout
+        slots = Self.slots(of: layout)
+        super.init(frame: .zero)
         isMultipleTouchEnabled = true
         backgroundColor = .clear
-        caps = Self.slots.map { FullKeyCapView(key: $0.key) }
+        caps = slots.map { FullKeyCapView(key: $0.key, talks: layout.spaceTalks) }
         caps.forEach(addSubview)
         isAccessibilityElement = false
-        accessibilityKeys = Self.slots.indices.map { index in
+        accessibilityKeys = slots.indices.map { index in
             let element = FullKeyAccessibilityElement(accessibilityContainer: self)
             element.onActivate = { [weak self] in self?.activate(index) ?? false }
             return element
@@ -410,7 +504,7 @@ final class FullKeyBlockView: UIView {
 
     /// Where the key of `slot` is drawn.
     private func keyFrame(_ slot: Slot) -> CGRect {
-        let unit = bounds.width / Self.columns
+        let unit = bounds.width / layout.columns
         return CGRect(
             x: CGFloat(slot.column) * unit + Self.keyMargin,
             y: CGFloat(slot.row) * (keyHeight + Self.rowGap),
@@ -422,7 +516,7 @@ final class FullKeyBlockView: UIView {
     /// The area that picks the key of `slot` on touch down: its columns and half the row gaps,
     /// so a finger landing between two keys still presses one.
     private func touchArea(_ slot: Slot) -> CGRect {
-        let unit = bounds.width / Self.columns
+        let unit = bounds.width / layout.columns
         let top = CGFloat(slot.row) * (keyHeight + Self.rowGap) - Self.rowGap / 2
         return CGRect(
             x: CGFloat(slot.column) * unit,
@@ -434,7 +528,7 @@ final class FullKeyBlockView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        for (index, slot) in Self.slots.enumerated() {
+        for (index, slot) in slots.enumerated() {
             let frame = keyFrame(slot)
             caps[index].frame = frame
             accessibilityKeys[index].accessibilityFrameInContainerSpace = frame
@@ -442,7 +536,7 @@ final class FullKeyBlockView: UIView {
     }
 
     private func slotIndex(at point: CGPoint) -> Int? {
-        Self.slots.firstIndex { touchArea($0).contains(point) }
+        slots.firstIndex { touchArea($0).contains(point) }
     }
 
     // MARK: Touches
@@ -453,6 +547,17 @@ final class FullKeyBlockView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            let id = ObjectIdentifier(touch)
+            fingers.insert(id)
+            if layout.swipes {
+                // While a swipe runs every other finger is ignored.
+                if swipe?.recognised == true { continue }
+                // Only a finger that comes down alone may become a swipe; a second finger rules
+                // the first one out, so two-thumb typing never swipes.
+                swipe = fingers.count == 1
+                    ? Swipe(touch: id, start: touch.location(in: nil), timestamp: touch.timestamp)
+                    : nil
+            }
             begin(touch)
         }
         refresh()
@@ -460,12 +565,15 @@ final class FullKeyBlockView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            // Before the key's own checks: a finger that already slid off its key may still
+            // turn into a swipe.
+            if trackSwipe(touch) { continue }
             guard let entry = tracked[ObjectIdentifier(touch)], !entry.cancelled else { continue }
             if entry.talking {
                 onDictateMove(touch.location(in: nil))
                 continue
             }
-            let slot = Self.slots[entry.slot]
+            let slot = slots[entry.slot]
             if case .modifier = slot.key { continue }
             let allowed = keyFrame(slot).insetBy(dx: -Self.slop, dy: -Self.slop)
             if !allowed.contains(touch.location(in: self)) {
@@ -477,6 +585,7 @@ final class FullKeyBlockView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            lift(touch)
             guard let entry = tracked.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             end(entry)
         }
@@ -485,6 +594,8 @@ final class FullKeyBlockView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            // A cancelled swipe still reports its end, so the host settles.
+            lift(touch)
             guard let entry = tracked.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             abandon(entry)
         }
@@ -497,8 +608,14 @@ final class FullKeyBlockView: UIView {
         if newWindow == nil { cancelAllTouches() }
     }
 
-    /// Drops every finger as if the system cancelled them.
+    /// Drops every finger as if the system cancelled them. A swipe under way still reports its
+    /// end, so the host is never left mid-drag.
     func cancelAllTouches() {
+        fingers.removeAll()
+        if let swipe {
+            self.swipe = nil
+            if swipe.recognised { onSwipeEnd(swipe.predictedEnd) }
+        }
         cancelTouches(keepingTalk: false)
     }
 
@@ -514,12 +631,62 @@ final class FullKeyBlockView: UIView {
         guard isActive, !talking, let index = slotIndex(at: touch.location(in: self)) else { return }
         let entry = TrackedTouch(slot: index)
         tracked[ObjectIdentifier(touch)] = entry
-        let key = Self.slots[index].key
+        let key = slots[index].key
         if key == .space {
-            scheduleTalk(entry)
+            if layout.spaceTalks { scheduleTalk(entry) }
         } else if key.repeats {
             scheduleRepeat(entry, key: key)
         }
+    }
+
+    // MARK: Swipe
+
+    /// Follows the swipe's finger. Returns whether `touch` is a recognised swipe, which no key
+    /// handles any more.
+    private func trackSwipe(_ touch: UITouch) -> Bool {
+        guard var swipe, swipe.touch == ObjectIdentifier(touch) else { return false }
+        let location = touch.location(in: nil)
+        if !swipe.recognised {
+            let dx = location.x - swipe.start.x
+            let dy = location.y - swipe.start.y
+            guard hypot(dx, dy) > Self.swipeThreshold else { return false }
+            // Mainly vertical (within 45° of it), or never: a sideways slide stays a key's.
+            guard abs(dy) > abs(dx) else {
+                self.swipe = nil
+                return false
+            }
+            swipe.recognised = true
+            // Its key sends nothing, stops repeating and shows unpressed.
+            if let entry = tracked[ObjectIdentifier(touch)] { cancel(entry) }
+        }
+        advance(&swipe, to: touch)
+        self.swipe = swipe
+        onSwipe(swipe.translation)
+        return true
+    }
+
+    /// The swipe's finger lifted or was cancelled: a recognised swipe reports its predicted end.
+    private func lift(_ touch: UITouch) {
+        let id = ObjectIdentifier(touch)
+        fingers.remove(id)
+        guard var swipe, swipe.touch == id else { return }
+        self.swipe = nil
+        guard swipe.recognised else { return }
+        advance(&swipe, to: touch)
+        onSwipeEnd(swipe.predictedEnd)
+    }
+
+    /// Moves the swipe to the finger's position now. The speed is smoothed over the latest moves;
+    /// a finger that rested before lifting has none left.
+    private func advance(_ swipe: inout Swipe, to touch: UITouch) {
+        let translation = touch.location(in: nil).y - swipe.start.y
+        let elapsed = touch.timestamp - swipe.timestamp
+        if elapsed > 0 {
+            let speed = (translation - swipe.translation) / elapsed
+            swipe.velocity = elapsed > 0.05 ? speed : swipe.velocity * 0.4 + speed * 0.6
+        }
+        swipe.translation = translation
+        swipe.timestamp = touch.timestamp
     }
 
     private func end(_ entry: TrackedTouch) {
@@ -532,7 +699,7 @@ final class FullKeyBlockView: UIView {
             if entry.prewarmed { onDictateAbort() }
         }
         guard !entry.cancelled else { return }
-        let key = Self.slots[entry.slot].key
+        let key = slots[entry.slot].key
         switch key {
         case .modifier(let modifier):
             if !entry.used { tapModifier(modifier) }
@@ -609,7 +776,7 @@ final class FullKeyBlockView: UIView {
 
     /// A finger is on `modifier` (and was not cancelled).
     private func held(_ modifier: FullKeyModifier) -> Bool {
-        tracked.values.contains { !$0.cancelled && Self.slots[$0.slot].key == .modifier(modifier) }
+        tracked.values.contains { !$0.cancelled && slots[$0.slot].key == .modifier(modifier) }
     }
 
     private func applies(_ modifier: FullKeyModifier) -> Bool {
@@ -643,7 +810,7 @@ final class FullKeyBlockView: UIView {
             latches[modifier] = .off
         }
         for entry in tracked.values where !entry.cancelled {
-            if case .modifier = Self.slots[entry.slot].key { entry.used = true }
+            if case .modifier = slots[entry.slot].key { entry.used = true }
         }
         refresh()
     }
@@ -651,7 +818,7 @@ final class FullKeyBlockView: UIView {
     /// VoiceOver's activation: a tap on the key.
     private func activate(_ index: Int) -> Bool {
         guard isActive, !talking else { return false }
-        let key = Self.slots[index].key
+        let key = slots[index].key
         switch key {
         case .modifier(let modifier):
             tapModifier(modifier)
@@ -675,7 +842,7 @@ final class FullKeyBlockView: UIView {
             pressed.insert(entry.slot)
             if entry.talking { talkingSlot = entry.slot }
         }
-        for (index, slot) in Self.slots.enumerated() {
+        for (index, slot) in slots.enumerated() {
             var state = FullKeyCapView.State()
             state.pressed = pressed.contains(index)
             state.shifted = shifted
@@ -691,7 +858,7 @@ final class FullKeyBlockView: UIView {
                 break
             }
             caps[index].state = state
-            accessibilityKeys[index].update(key: slot.key, state: state, enabled: isActive)
+            accessibilityKeys[index].update(key: slot.key, state: state, enabled: isActive, talks: layout.spaceTalks)
         }
     }
 }
@@ -720,12 +887,20 @@ private final class FullKeyCapView: UIView {
     }
 
     let key: FullKey
+    /// Space talks when held: its cap shows the microphone and 按住说话.
+    private let talks: Bool
     /// The key's glyph or word; on a number or symbol key, the unshifted character.
     private let main = UILabel()
     /// A number or symbol key's shifted character, above `main`.
     private let alternate = UILabel()
     /// The space key's microphone.
     private let icon = UIImageView()
+
+    /// A number or symbol key with a different shifted character (the letter layer's digits
+    /// have none).
+    private var hasAlternate: Bool {
+        if case .character(let base, let shifted) = key { base != shifted } else { false }
+    }
     /// Under a locked modifier's glyph.
     private let lockBar = UIView()
 
@@ -738,8 +913,9 @@ private final class FullKeyCapView: UIView {
     private static let primaryForeground = UIColor(Theme.primaryForeground)
     private static let microphone = UIColor(Theme.microphone)
 
-    init(key: FullKey) {
+    init(key: FullKey, talks: Bool) {
         self.key = key
+        self.talks = talks
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         layer.cornerRadius = FullKeyBlockView.keyRadius
@@ -760,7 +936,10 @@ private final class FullKeyCapView: UIView {
         addSubview(lockBar)
         switch key {
         case .character:
-            alternate.isHidden = false
+            alternate.isHidden = !hasAlternate
+        case .space where !talks:
+            main.text = "space"
+            main.font = Theme.Fonts.FullKeyboard.function
         case .space:
             icon.isHidden = false
             icon.image = UIImage(
@@ -839,6 +1018,10 @@ private final class FullKeyCapView: UIView {
         case .letter(let letter):
             main.text = state.shifted ? letter.uppercased() : letter
             main.font = Theme.Fonts.FullKeyboard.letter
+        case .character(let base, _) where !hasAlternate:
+            // A digit of the letter layer: the digit alone, as large as the letters beside it.
+            main.text = base
+            main.font = Theme.Fonts.FullKeyboard.letter
         case .character(let base, let shifted):
             // The shifted character stays above the base one; ⇧ swaps which one is large.
             alternate.text = shifted
@@ -847,7 +1030,7 @@ private final class FullKeyCapView: UIView {
             alternate.textColor = state.shifted ? Self.foreground : Self.muted
             main.font = state.shifted ? Theme.Fonts.FullKeyboard.alternate : Theme.Fonts.FullKeyboard.character
             main.textColor = state.shifted ? Self.muted : Self.foreground
-        case .space:
+        case .space where talks:
             icon.image = UIImage(
                 systemName: state.talking ? "mic.fill" : "mic",
                 withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)
@@ -866,7 +1049,7 @@ private final class FullKeyCapView: UIView {
         super.layoutSubviews()
         let inset = bounds.insetBy(dx: 4, dy: 2)
         switch key {
-        case .character:
+        case .character where hasAlternate:
             let top = alternate.sizeThatFits(inset.size)
             let bottom = main.sizeThatFits(inset.size)
             let gap: CGFloat = 3
@@ -874,7 +1057,7 @@ private final class FullKeyCapView: UIView {
             let y = bounds.midY - total / 2
             alternate.frame = CGRect(x: inset.minX, y: y, width: inset.width, height: top.height)
             main.frame = CGRect(x: inset.minX, y: y + top.height + gap, width: inset.width, height: bottom.height)
-        case .space:
+        case .space where talks:
             let gap: CGFloat = 7
             let iconSize = icon.image?.size ?? .zero
             let text = main.sizeThatFits(inset.size)
@@ -904,8 +1087,8 @@ private final class FullKeyAccessibilityElement: UIAccessibilityElement {
         onActivate()
     }
 
-    func update(key: FullKey, state: FullKeyCapView.State, enabled: Bool) {
-        accessibilityLabel = Self.label(key, shifted: state.shifted)
+    func update(key: FullKey, state: FullKeyCapView.State, enabled: Bool, talks: Bool) {
+        accessibilityLabel = key == .space && !talks ? "空格" : Self.label(key, shifted: state.shifted)
         accessibilityTraits = enabled ? [.keyboardKey] : [.keyboardKey, .notEnabled]
         switch key {
         case .modifier, .capsLock:
