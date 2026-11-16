@@ -248,3 +248,21 @@ q  w  e  r  t  y  u  i  o  p
 11. Walkthrough: "not like a normal keyboard, follow the iOS layout"; "⌫ back up top; bottom-right should be the confirm key".
 12. What goes left of z, where iOS has ⇧: empty (recommended) / esc / common symbols → **`-` and `/`**.
 13. Product confirmation of the iOS-style layout and proportions → **confirmed**; execution as before (subagent opus, same branch, then install on the Duo).
+
+## Revision 2 — the letter layer spans the whole screen width (2026-11-17)
+
+### Product conclusions (confirmed by the owner)
+
+- Where the system draws the bars as a vertical rail (the outer display, portrait and landscape; a Split View half; the split detail), the letter layer runs edge to edge across the window, under the rail's lower part, like the system keyboard. The terminal stays above it.
+- While the letter layer is out, the rail's bottom items (附件, 粘贴) are hidden; they come back when the dock swaps back to the quick layer. The rail's top items (新建终端, 更多) stay.
+- The quick layer is unchanged. Layouts with horizontal bars already run the dock edge to edge and are unchanged.
+- Whether the system lets content draw under the rail is only known on the device; this revision is tried there first.
+
+### Decisions
+
+- **D9 Only the letter layer leaves the safe area**: the dock reaches into the rail's horizontal safe-area inset for the letter layer; the quick layer keeps exactly its current width and position. The rail's bottom-bar items are removed from the toolbar while the letter layer is out (more than half revealed), not overlaid. `(revised after walkthrough)`
+
+### Discussion log
+
+14. "Can the swiped-up keyboard fill the screen like an input method?" → which: full screen width / overlay the terminal / whole screen → **full screen width**.
+15. The rail's 附件 / 粘贴 under the keyboard: hide them while it is out (recommended) / quick layer full width too with them moved into 更多 → **hide them while it is out**.
