@@ -337,6 +337,9 @@ struct TerminalInputArea: View {
     let task: Coflux_V1_Task?
     /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
     var bottomGap: CGFloat = 8
+    /// The page's bars are a vertical rail beside the dock: the letter layer reaches under it,
+    /// across the whole window, like the system keyboard. The quick layer stays beside it.
+    var reachesUnderRail = false
     /// How far the letter layer is out: 0 (quick layer) … `letterLift` (letter layer).
     var keypadReveal: CGFloat = 0
     /// How much taller the letter layer is than the quick layer (`letterLift`).
@@ -369,6 +372,9 @@ struct TerminalInputArea: View {
     /// A swipe over the letter layer is under way (reported by the letter surface itself, which
     /// also reports its end when cancelled or taken away).
     @State private var swipingLetters = false
+    /// The dock's horizontal safe-area insets: where the rail is, on either side. Read from the
+    /// offered geometry; the dock's width never depends on them, so they never feed back.
+    @State private var sideInsets = EdgeInsets()
 
     private var sender: TerminalKeySender {
         TerminalKeySender(client: client, task: task)
@@ -405,8 +411,14 @@ struct TerminalInputArea: View {
         // The dock grows above the resting quick layer by `keypadReveal`. Both layers sit on its
         // bottom edge, so the taller letter layer comes out from the bottom up as it grows.
         .frame(height: Self.quickRowsHeight + Self.topPadding + bottomGap + max(0, keypadReveal), alignment: .bottom)
-        .clipped()
+        // Clipped to the dock's height, so the letter layer shows only as far as the dock has
+        // grown; open sideways by the rail, so the letter layer can run under it.
+        .clipShape(SidewaysOpenRectangle(overhang: max(railReach.leading, railReach.trailing)))
         .background(Theme.terminal)
+        .onGeometryChange(for: EdgeInsets.self) { proxy in
+            let insets = proxy.safeAreaInsets
+            return EdgeInsets(top: 0, leading: insets.leading, bottom: 0, trailing: insets.trailing)
+        } action: { sideInsets = $0 }
         // From static row metrics, so it never feeds back (see `letterLift`).
         .onAppear { onKeypadHeight(lift) }
         // A drag the system cancelled never reaches onEnded: settle it here. After a normal end
@@ -443,10 +455,18 @@ struct TerminalInputArea: View {
             .simultaneousGesture(keypadDrag(minimumDistance: 10))
     }
 
+    /// How far the letter layer runs past the dock on each side: under the rail, wherever it is;
+    /// nothing without one.
+    private var railReach: EdgeInsets {
+        reachesUnderRail ? sideInsets : EdgeInsets()
+    }
+
     /// Lower-case letters and digits laid out like the iOS system keyboard, as one multi-touch
     /// surface (`FullKeyBlock`, letter layout) with 42 pt keys, wired to the active terminal;
     /// dimmed and inert while it does not run. Always mounted, so a swipe begun on it runs to
-    /// its end. Its own vertical swipe drives the dock like the quick layer's drag.
+    /// its end. Its own vertical swipe drives the dock like the quick layer's drag. Beside a
+    /// rail it spans the whole window, keys and background, by running past the dock's sides
+    /// (negative padding: the dock's own size, and so the quick layer's, never changes).
     private var letterLayer: some View {
         FullKeyBlock(
             layout: .letters,
@@ -465,6 +485,10 @@ struct TerminalInputArea: View {
         .padding(.horizontal, Self.sideInset)
         .padding(.top, Self.topPadding)
         .padding(.bottom, bottomGap)
+        // Under the rail the dock's own background does not reach.
+        .background(reachesUnderRail ? Theme.terminal : .clear)
+        .padding(.leading, -railReach.leading)
+        .padding(.trailing, -railReach.trailing)
     }
 
     /// `progress` eased onto 0 … 1 between `from` and `to`: the layers' cross-fade.
@@ -619,6 +643,16 @@ struct TerminalInputArea: View {
             .accessibilityHint("轻点打字，按住说话")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onCompose() }
+    }
+}
+
+/// The bounds, widened by `overhang` on both sides: a clip that keeps its top and bottom but lets
+/// the dock's letter layer run under the rail beside it. With no overhang it is `clipped()`.
+struct SidewaysOpenRectangle: Shape {
+    var overhang: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: -overhang, dy: 0))
     }
 }
 

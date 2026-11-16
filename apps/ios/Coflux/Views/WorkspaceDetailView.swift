@@ -332,7 +332,9 @@ struct WorkspaceDetailView: View {
                     .background(Theme.terminal)
                 }
             }
-            .clipped()
+            // Open sideways by the rail's width, so the dock's letter layer can run under the
+            // rail; everything else here stays inside (the pager clips itself).
+            .clipShape(SidewaysOpenRectangle(overhang: barsOnRail ? railInset : 0))
             // With the bars on the rail nothing is drawn across the top or the bottom (status,
             // camera and home indicator sit on the rail), yet the safe area keeps ~30 pt at each:
             // the title row and the keys take them.
@@ -676,6 +678,7 @@ struct WorkspaceDetailView: View {
             client: client,
             task: activeTask,
             bottomGap: barsOnRail ? TerminalInputArea.railBottomGap : 8,
+            reachesUnderRail: barsOnRail,
             keypadReveal: keypadReveal,
             onKeypadHeight: { keypadHeight = $0 },
             onRestingHeight: { restingDockHeight = $0 },
@@ -794,9 +797,12 @@ struct WorkspaceDetailView: View {
                 .visibilityPriority(.high)
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .visibilityPriority(.high)
-            ToolbarItem(placement: .bottomBar) { attachMenu }
-                .visibilityPriority(.low)
-            ToolbarItem(placement: .bottomBar) { pasteButton }
+            // The letter layer runs under the rail's lower end: these step aside while it is out.
+            if !lettersOut {
+                ToolbarItem(placement: .bottomBar) { attachMenu }
+                    .visibilityPriority(.low)
+                ToolbarItem(placement: .bottomBar) { pasteButton }
+            }
         } else {
             // One 更多 holds 粘贴 and 附件 too: a top bar that runs out of room folds items into
             // the system's own overflow menu, which put 更多 inside another 更多.
@@ -882,6 +888,11 @@ struct WorkspaceDetailView: View {
             open = keypadReveal > keypadHeight / 2
         }
         setKeypad(open: open)
+    }
+
+    /// The dock shows the letter layer: more than half out, the dock's own threshold.
+    private var lettersOut: Bool {
+        keypadHeight > 0 && keypadReveal > keypadHeight / 2
     }
 
     /// VoiceOver's action: swaps to the other layer.
