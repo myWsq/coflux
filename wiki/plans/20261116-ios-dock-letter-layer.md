@@ -209,3 +209,12 @@ Out of scope:
 
 - iOS only: ships with the next `ios-<N>` tag; no centre deploy, no desktop release.
 - Acceptance is the owner's on the Duo: outer display portrait and landscape (short window), inner display open wide, and a check that the inner display open tall is unchanged.
+
+## Outcome
+
+- Status: APPROVE — 2026-11-17
+- Mode: subagent(opus), one package (two serial milestones), no revision rounds
+- Commits: `122ebb29..37011c3f`
+- Deviations: the letter layer still swipes while the terminal is not running (its keys are dimmed and send nothing) — accepted, otherwise the dock could be stuck on the letter layer until the terminal runs; a few comments outside the listed anchors reworded to drop "extra keys" / short-window wording.
+- Verification: iOS device compile BUILD SUCCEEDED with exactly the baseline's warnings (none in touched files); no `TerminalExtraKeys` / `showingKeypad` / `shortWindow` / `shortPageHeight` / `inlineKeypad` left under `apps/ios`; diff reviewed against D1–D7. Installed on the Duo (Debug, direct install); the walkthrough is the owner's.
+- Follow-ups: device check that the hidden letter layer never takes taps at rest (it relies on SwiftUI `allowsHitTesting(false)` over a `UIViewRepresentable`) and that a swipe down starting on a letter key types nothing. A fresh worktree needs `apps/ios/Frameworks/CofluxTailcat.xcframework` copied in (a symlink is not accepted) and its own `-derivedDataPath` to build.
