@@ -289,3 +289,19 @@ q  w  e  r  t  y  u  i  o  p
 17. "z should be directly under s" → R4.
 18. "Keep only `/` beside z; space is too long, put keys on either side" → which keys → **"just ctrl and option for now"** → R5.
 19. Asked whether the keyboard could take the system keyboard's place like an input method, only inside Coflux → researched; recorded as `20261117-ios-in-app-keyboard-research` (TODO).
+
+## Revision 6 — the quick layer spans the width too and takes in 粘贴 / 附件 (2026-11-17)
+
+- Product (owner): since the letter layer runs under the rail, the quick layer should as well; the rail's bottom buttons 粘贴 and 附件 become keys of the quick layer, in a new column at its far left:
+
+  ```
+  📋  esc  tab [⌨|🎤]  ↑  ⌫  ⏎
+  📎  ^C   ^D   /   ←  ↓  →  ⏎
+  ```
+
+  The rail keeps only 新建终端 and 更多.
+- **D10** Both layers reach under the rail (the same `railReach`, never the sidebar). The quick layer has eight columns in every dock layout. The rail's bottom-bar items are gone in every state. Layouts with horizontal bars keep 粘贴 / 附件 in 更多 as today (the tall layout's full keyboard has no 附件 key), so there they appear in both places. `(decided while planning)`
+
+### Discussion log
+
+20. "Full width in the resting state too, and fold the two rail buttons into our keyboard" → where: left of ⏎ (recommended) / far right / **far left**.
