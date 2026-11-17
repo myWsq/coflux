@@ -219,7 +219,7 @@ struct TerminalKey: View {
 
 /// A key that repeats (arrows, backspace): a tap sends once on release; held for 0.35 s it sends
 /// at once and then every 80 ms until released. A finger that moves past the dock's drag
-/// threshold cancels the key without sending, so a swipe that starts on it moves the extra keys
+/// threshold cancels the key without sending, so a swipe that starts on it moves the dock
 /// instead. (It used to send on touch-down, like a hardware key, which fired an arrow at the
 /// start of every swipe begun on one — seen on the Duo, 2026-11-10.)
 struct RepeatKey: View {
@@ -230,7 +230,7 @@ struct RepeatKey: View {
     let bytes: () -> String
 
     /// How far the finger may wander before the touch counts as a swipe: the dock's drag
-    /// threshold, so the key gives up exactly when the extra keys start to follow.
+    /// threshold, so the key gives up exactly when the dock starts to follow.
     private static let slop: CGFloat = 10
     /// Also the full keyboard's repeat timing (`FullKeyBlockView`).
     static let holdDelay: Duration = .milliseconds(350)
@@ -247,7 +247,7 @@ struct RepeatKey: View {
         KeyCap(label: label, systemImage: systemImage, height: height)
             .opacity(phase == .pressed || phase == .repeating ? 0.6 : 1)
             .animation(.easeOut(duration: 0.08), value: phase)
-            // Global coordinates: the dock moves under the finger once the extra keys follow it.
+            // Global coordinates: the dock moves under the finger once it starts to follow.
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .updating($touching) { _, state, _ in state = true }
@@ -316,39 +316,48 @@ struct RepeatKey: View {
 
 // MARK: - The dock
 
-/// The terminal page's dock: an optional secret-request bar over a fixed key row, pinned to the
-/// bottom of the content area. Typing lives on the 输入 toolbar item; talking on the row's
-/// microphone key (hold).
+/// The terminal page's dock: an optional secret-request bar over one of two key layers, pinned to
+/// the bottom of the content area. Typing lives on the 输入 toolbar item; talking on the quick
+/// rows' microphone key (hold).
 ///
-/// - Key row: the same keys whatever the agent is doing (user's call, 2026-11-10: a waiting
-///   agent gets no banner and no option keys — its menu is answered with the ordinary keys).
-/// - Extra keys: a swipe up anywhere over the dock brings the keys the quick rows leave out
-///   (`TerminalExtraKeys`) up above the quick rows, following the finger; the host owns how much
-///   shows (`keypadReveal`), snaps it open or shut on release, and pushes the terminal up by the
-///   same amount. A swipe down puts them away.
-/// - The row has one fixed height, and the secret-request bar floats above the dock outside its
-///   measured size, so it never changes the terminal's size.
-/// - Laptop pose: `inlineKeypad` shows the quick rows and the extra keys below the fold.
+/// - Quick layer (at rest): two rows of the keys a terminal needs most, the same whatever the
+///   agent is doing (user's call, 2026-11-10: a waiting agent gets no banner and no option
+///   keys — its menu is answered with the ordinary keys).
+/// - Letter layer: a swipe up over the quick layer swaps the whole dock for lower-case letters
+///   and digits (`FullKeyBlock` with the letter layout), following the finger; a swipe down over
+///   the letter layer swaps it back. The dock grows above the quick layer by `keypadReveal` and
+///   the two layers cross-fade; the host owns `keypadReveal`, snaps it open or shut on release,
+///   and pushes the terminal up by the same amount. No key changes the layer.
+/// - The quick layer has one fixed height, and the secret-request bar floats above the dock
+///   outside its measured size, so it never changes the terminal's size.
 ///
 /// 终端本体是纯显示（DisplayOnlyTerminalView），软键盘输入全部从这里与成文层走 client.sendInput。
 struct TerminalInputArea: View {
     let client: CofluxClient
     let task: Coflux_V1_Task?
-    var inlineKeypad = false
     /// Space below the keys: `railBottomGap` where the page runs to the screen's bottom edge.
     var bottomGap: CGFloat = 8
-    /// How much of the extra keys show above the key rows, 0 … their natural height.
+    /// The rail beside the dock, as the page's leading and trailing safe-area insets where they
+    /// are the rail (zero elsewhere, and on a side that is a sidebar): both layers reach under
+    /// it, across the whole window, like the system keyboard. The host reads and filters them
+    /// (`railReach`) from the page, which reaches the window's edges; the dock itself sits inside
+    /// them and would read zero.
+    var railInsets = EdgeInsets()
+    /// How far the letter layer is out: 0 (quick layer) … `letterLift` (letter layer).
     var keypadReveal: CGFloat = 0
-    /// The extra keys' natural height.
+    /// How much taller the letter layer is than the quick layer (`letterLift`).
     let onKeypadHeight: (CGFloat) -> Void
-    /// The resting dock's height (the key rows): the terminal ends above it.
+    /// The resting dock's height (the quick layer): the terminal ends above it.
     let onRestingHeight: (CGFloat) -> Void
     /// A vertical drag over the keys: the translation so far.
     let onKeypadDrag: (CGFloat) -> Void
     /// The drag ended: its predicted final translation (a flick carries on).
     let onKeypadDragEnd: (CGFloat) -> Void
-    /// VoiceOver's expand / collapse action.
+    /// VoiceOver's swap between the two layers.
     let onKeypadToggle: () -> Void
+    /// 附件's choices: pick a photo, or a file, to upload to the terminal.
+    let onPickPhoto: () -> Void
+    let onPickFile: () -> Void
     /// Open the secret request sheet of the active terminal.
     let onOpenSecret: () -> Void
     /// The input key's tap: the compose layer with the system keyboard.
@@ -360,14 +369,15 @@ struct TerminalInputArea: View {
     let onDictateEnd: () -> Void
     let onDictateAbort: () -> Void
 
-    /// The extra keys' natural height (measured at a fixed size, so it never feeds back).
-    @State private var extrasHeight: CGFloat = 0
-    /// A keypad drag is under way. Resets by itself however the drag ends — including when the
-    /// system cancels it, where `onEnded` never runs; the reset then settles the keypad.
+    /// A drag over the quick layer is under way. Resets by itself however the drag ends —
+    /// including when the system cancels it, where `onEnded` never runs; the reset then settles
+    /// the dock.
     @GestureState private var draggingKeypad = false
     /// The last drag's predicted end, for settling a cancelled drag.
     @State private var lastPredictedTranslation: CGFloat = 0
-
+    /// A swipe over the letter layer is under way (reported by the letter surface itself, which
+    /// also reports its end when cancelled or taken away).
+    @State private var swipingLetters = false
 
     private var sender: TerminalKeySender {
         TerminalKeySender(client: client, task: task)
@@ -378,60 +388,43 @@ struct TerminalInputArea: View {
     }
 
     var body: some View {
-        Group {
-            if inlineKeypad {
-                VStack(spacing: 7) {
-                    notice
-                        .padding(.bottom, 3)
-                    keyRows
-                    TerminalExtraKeys(client: client, task: task)
-                }
-                .padding(.horizontal, Self.sideInset)
-                .padding(.vertical, 8)
-                .background(Theme.background)
-            } else {
-                dock
-            }
-        }
-        .animation(.smooth(duration: 0.2), value: pendingSecret?.name)
+        dock
+            .animation(.smooth(duration: 0.2), value: pendingSecret?.name)
     }
 
     private var dock: some View {
-        // 0 … 1: how far the extra keys are out.
-        let progress = extrasHeight > 0 ? min(max(keypadReveal / extrasHeight, 0), 1) : 0
-        return VStack(spacing: 0) {
-            // Above the quick rows, which never move: always mounted at their natural height and
-            // shown through a window that grows upwards from the quick rows, so the row nearest
-            // them comes out first, as if rising from behind them; the keys fade and settle from
-            // slightly smaller while they come.
-            TerminalExtraKeys(client: client, task: task)
-                .padding(.horizontal, Self.sideInset)
-                .padding(.top, 8)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                    extrasHeight = height
-                    onKeypadHeight(height)
-                }
-                .opacity(progress)
-                .scaleEffect(0.92 + 0.08 * progress, anchor: .bottom)
-                .frame(height: keypadReveal, alignment: .bottom)
-                .clipped()
-                // Hit-testable while a drag runs: dropping hit testing mid-drag (as the keys
-                // shrink) would cancel the drag and leave the keypad half out.
-                .allowsHitTesting(progress > 0.9 || draggingKeypad)
-                .accessibilityHidden(keypadReveal == 0)
-            keyRows
-                .padding(.horizontal, Self.sideInset)
-                .padding(.top, 8)
-                .padding(.bottom, bottomGap)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onRestingHeight($0) }
+        let lift = Self.letterLift
+        // 0 … 1: how far the letter layer is out.
+        let progress = lift > 0 ? min(max(keypadReveal / lift, 0), 1) : 0
+        let lettersShown = progress > 0.5
+        // One layer takes touches at a time. A drag keeps the layer it began on touchable to
+        // its end: dropping hit testing mid-drag would cancel it and leave the dock half out.
+        let quickTouchable = (!lettersShown && !swipingLetters) || draggingKeypad
+        let lettersTouchable = (lettersShown && !draggingKeypad) || swipingLetters
+        return ZStack(alignment: .bottom) {
+            quickLayer
+                .opacity(1 - Self.fade(progress, from: 0, to: 0.6))
+                .allowsHitTesting(quickTouchable)
+                .accessibilityHidden(lettersShown)
+            letterLayer
+                .opacity(Self.fade(progress, from: 0.4, to: 1))
+                .allowsHitTesting(lettersTouchable)
+                .accessibilityHidden(!lettersShown)
         }
-        .background(Theme.terminal)
-        // One vertical drag over the whole dock — keys and gaps: up brings the extra keys
-        // out, down puts them away. Simultaneous, so it never takes a key's tap away; per-key
-        // high-priority drags lost to the keys' own gestures on the device. The host ignores it
-        // while talking, where the finger slides up from the input key onto 发送 / 取消.
-        .simultaneousGesture(keypadDrag(minimumDistance: 10))
+        // The dock grows above the resting quick layer by `keypadReveal`. Both layers sit on its
+        // bottom edge, so the taller letter layer comes out from the bottom up as it grows.
+        .frame(height: Self.quickRowsHeight + Self.topPadding + bottomGap + max(0, keypadReveal), alignment: .bottom)
+        // Clipped to the dock's height, so the letter layer shows only as far as the dock has
+        // grown; open sideways by the rail, so both layers can run under it.
+        .clipShape(SidewaysOpenRectangle(leading: railInsets.leading, trailing: railInsets.trailing))
+        // Under the rail too, behind both layers, so the cross-fade never shows through there.
+        .background {
+            Theme.terminal
+                .padding(.leading, -railInsets.leading)
+                .padding(.trailing, -railInsets.trailing)
+        }
+        // From static row metrics, so it never feeds back (see `letterLift`).
+        .onAppear { onKeypadHeight(lift) }
         // A drag the system cancelled never reaches onEnded: settle it here. After a normal end
         // this second call finds no drag running and does nothing.
         .onChange(of: draggingKeypad) { _, dragging in
@@ -439,10 +432,10 @@ struct TerminalInputArea: View {
         }
         // No handle (user's call, 2026-11-08): the swipe over the keys is the whole gesture.
         // VoiceOver gets it as an action.
-        .accessibilityAction(named: keypadReveal > 0 ? "收起按键" : "展开按键") { onKeypadToggle() }
+        .accessibilityAction(named: lettersShown ? "快捷键" : "字母键盘") { onKeypadToggle() }
         // Outside the measured size, floating just above the dock's top edge — so it rises with
-        // the extra keys — over the terminal's last line: the notice never resizes the terminal
-        // (D13).
+        // the letter layer — over the terminal's last line: the notice never resizes the
+        // terminal (D13).
         .overlay(alignment: .top) {
             notice
                 .padding(.horizontal, Self.sideInset)
@@ -450,8 +443,83 @@ struct TerminalInputArea: View {
         }
     }
 
+    /// The quick rows, measured: their height is the resting dock's. Beside a rail they span the
+    /// whole window like the letter layer, by running past the dock's sides (negative padding:
+    /// the dock's own size never changes, and the rows lay out across the width offered).
+    private var quickLayer: some View {
+        keyRows
+            .padding(.horizontal, Self.sideInset)
+            .padding(.top, Self.topPadding)
+            .padding(.bottom, bottomGap)
+            .padding(.leading, -railInsets.leading)
+            .padding(.trailing, -railInsets.trailing)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onRestingHeight($0) }
+            // One vertical drag over the whole layer — keys and gaps: up brings the letter layer
+            // out. Simultaneous, so it never takes a key's tap away; per-key high-priority drags
+            // lost to the keys' own gestures on the device. On this layer only, so it never sees
+            // the letter layer's touches, which report their own swipe. The host ignores it
+            // while talking, where the finger slides up from the input key onto 发送 / 取消.
+            .contentShape(Rectangle())
+            .simultaneousGesture(keypadDrag(minimumDistance: 10))
+    }
+
+    /// Lower-case letters and digits laid out like the iOS system keyboard, as one multi-touch
+    /// surface (`FullKeyBlock`, letter layout) with 42 pt keys, wired to the active terminal;
+    /// dimmed and inert while it does not run. Always mounted, so a swipe begun on it runs to
+    /// its end. Its own vertical swipe drives the dock like the quick layer's drag. Beside a
+    /// rail it spans the whole window by running past the dock's sides, like the quick layer.
+    private var letterLayer: some View {
+        FullKeyBlock(
+            layout: .letters,
+            sender: sender,
+            keyHeight: Theme.Metrics.letterKeyHeight,
+            onSwipe: { translation in
+                swipingLetters = true
+                onKeypadDrag(translation)
+            },
+            onSwipeEnd: { predictedTranslation in
+                swipingLetters = false
+                onKeypadDragEnd(predictedTranslation)
+            }
+        )
+        .frame(height: Self.letterRowsHeight)
+        .padding(.horizontal, Self.sideInset)
+        .padding(.top, Self.topPadding)
+        .padding(.bottom, bottomGap)
+        .padding(.leading, -railInsets.leading)
+        .padding(.trailing, -railInsets.trailing)
+    }
+
+    /// `progress` eased onto 0 … 1 between `from` and `to`: the layers' cross-fade.
+    private static func fade(_ progress: CGFloat, from: CGFloat, to: CGFloat) -> CGFloat {
+        let t = min(max((progress - from) / (to - from), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
     /// The keys' side margins: nearly flush, lined up with the terminal's text above.
     static let sideInset: CGFloat = 4
+
+    /// Above either layer's keys.
+    private static let topPadding: CGFloat = 8
+    /// The gap between the quick rows and between their keys.
+    private static let quickSpacing: CGFloat = 7
+    /// The two quick rows' height.
+    private static var quickRowsHeight: CGFloat {
+        Theme.Metrics.keyHeight * 2 + quickSpacing
+    }
+
+    /// The letter block's height: five 42 pt rows 10 pt apart, 250 pt.
+    private static var letterRowsHeight: CGFloat {
+        FullKeyBlockView.height(keyHeight: Theme.Metrics.letterKeyHeight, layout: .letters)
+    }
+
+    /// How much taller the letter layer is than the quick layer (both share the top padding and
+    /// the bottom gap). From the static row metrics, never from a measurement of the dock: its
+    /// height follows `keypadReveal`, and feeding a measurement of it back spun SwiftUI in an
+    /// endless layout loop on the Duo (see `keyRows`).
+    static var letterLift: CGFloat {
+        letterRowsHeight - quickRowsHeight
+    }
 
     /// The keys' bottom gap where the page runs to the screen's bottom edge (bars on the rail):
     /// their bottom edge lines up with the rail's lowest button, measured on the Duo's outer
@@ -478,33 +546,36 @@ struct TerminalInputArea: View {
 
     // MARK: Key row
 
-    /// Two rows on seven equal columns, the microphone two columns wide beside ↑ and a tall ⏎
-    /// spanning both rows (user's layout, 2026-11-08):
+    /// Two rows on eight equal columns, 粘贴 and 附件 leading, the microphone two columns wide
+    /// beside ↑ and a tall ⏎ spanning both rows (user's layout, 2026-11-08; 粘贴 and 附件 moved in
+    /// from the rail's bottom end, 2026-11-17):
     ///
-    ///     esc  tab  [  🎤  ]  ↑  ⌫  ⏎
-    ///     ^C   ^D   /    ←    ↓  →  ⏎
+    ///     📋  esc  tab  [ ⌨|🎤 ]  ↑  ⌫  ⏎
+    ///     📎  ^C   ^D   /    ←    ↓  →  ⏎
     ///
-    /// Every key but the microphone also drags the extra keys out; the microphone is left out, so sliding up from it
-    /// while talking (onto 发送 / 取消) never moves them.
+    /// A swipe up over the rows brings the letter layer out; sliding up from the microphone while
+    /// talking (onto 发送 / 取消) never moves it.
     private var keyRows: some View {
         let height = Theme.Metrics.keyHeight
-        let spacing: CGFloat = 7
+        let spacing = Self.quickSpacing
         // The column width comes from the space offered, never from a measurement of the keys:
         // sizing the keys from the dock's own measured width fed back into that width and spun
         // SwiftUI in an endless layout loop until the watchdog killed the app (seen on the Duo).
         return GeometryReader { proxy in
-            let column = max(0, (proxy.size.width - spacing * 6) / 7)
+            let column = max(0, (proxy.size.width - spacing * 7) / 8)
             keyColumns(column: column, height: height, spacing: spacing)
         }
-        .frame(height: height * 2 + spacing)
+        .frame(height: Self.quickRowsHeight)
     }
 
-    /// Seven columns of `column` each: ⏎ takes one, the microphone two.
+    /// Eight columns of `column` each: ⏎ takes one, the microphone two; every other key of a row
+    /// takes an equal share of what is left, one column each.
     private func keyColumns(column: CGFloat, height: CGFloat, spacing: CGFloat) -> some View {
         HStack(spacing: spacing) {
             VStack(spacing: spacing) {
                 HStack(spacing: spacing) {
                     terminalKeys {
+                        pasteKey
                         TerminalKey(sender: sender, label: "esc") { "\u{1b}" }
                         TerminalKey(sender: sender, label: "tab") { "\t" }
                     }
@@ -518,6 +589,7 @@ struct TerminalInputArea: View {
                 }
                 HStack(spacing: spacing) {
                     terminalKeys {
+                        attachKey
                         TerminalKey(sender: sender, label: "^C", style: .destructive) { "\u{03}" }
                         TerminalKey(sender: sender, label: "^D") { "\u{04}" }
                         TerminalKey(sender: sender, label: "/") { "/" }
@@ -543,6 +615,37 @@ struct TerminalInputArea: View {
         }
         .disabled(sender.sessionID == nil)
         .opacity(sender.sessionID == nil ? 0.45 : 1)
+    }
+
+    /// 粘贴: an image on the clipboard is uploaded, text is pasted (`TerminalKeySender.paste`).
+    /// Pasted text already plays the keys' haptic; every other outcome plays it here.
+    private var pasteKey: some View {
+        let sender = sender
+        return Button {
+            let pasteboard = UIPasteboard.general
+            if pasteboard.hasImages || !pasteboard.hasStrings {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+            sender.paste()
+        } label: {
+            KeyCap(systemImage: "doc.on.clipboard")
+        }
+        .buttonStyle(KeyPressStyle())
+        .disabled(sender.uploading)
+        .accessibilityLabel("粘贴")
+    }
+
+    /// 附件: 相册 or 文件, uploaded to the terminal by the host's pickers.
+    private var attachKey: some View {
+        Menu {
+            Button("相册", systemImage: "photo") { onPickPhoto() }
+            Button("文件", systemImage: "folder") { onPickFile() }
+        } label: {
+            KeyCap(systemImage: "paperclip")
+        }
+        .buttonStyle(KeyPressStyle())
+        .disabled(sender.uploading)
+        .accessibilityLabel("上传文件到终端")
     }
 
     /// Hold to talk (the dictation overlay covers the page; slide onto 发送 / 取消 or lift for
@@ -574,6 +677,23 @@ struct TerminalInputArea: View {
             .accessibilityHint("轻点打字，按住说话")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onCompose() }
+    }
+}
+
+/// The bounds, widened by `leading` and `trailing` on those sides: a clip that keeps its top and
+/// bottom but lets the dock's letter layer run under the rail beside it, and only there. With no
+/// widening it is `clipped()`. Leading is the left edge: the app lays out left to right.
+struct SidewaysOpenRectangle: Shape {
+    var leading: CGFloat
+    var trailing: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(
+            x: rect.minX - leading,
+            y: rect.minY,
+            width: rect.width + leading + trailing,
+            height: rect.height
+        ))
     }
 }
 
@@ -632,47 +752,6 @@ struct SecretRequestNotice: View {
         .background(Theme.warning.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Theme.warning.opacity(0.3), lineWidth: 1))
         .padding(.bottom, 2)
-    }
-}
-
-// MARK: - The extra keys
-
-/// The keys the two quick rows leave out (user's call, 2026-11-08: pulling the dock up shows only
-/// what is not already on screen), on the same seven columns:
-///
-///     1   2   3   4   q   :   ~
-///     ⇧⇥  ^R  ^U  ^L  ^Z  |   ^W
-///
-/// Pulled out below the quick rows, inline in the laptop pose, or as a sheet in a short window.
-/// 粘贴, 相册 and 文件 live on the toolbar (粘贴 and 附件).
-struct TerminalExtraKeys: View {
-    let client: CofluxClient
-    let task: Coflux_V1_Task?
-
-    private var sender: TerminalKeySender {
-        TerminalKeySender(client: client, task: task)
-    }
-
-    var body: some View {
-        VStack(spacing: 7) {
-            HStack(spacing: 7) {
-                ForEach(["1", "2", "3", "4", "q", ":", "~"], id: \.self) { key in
-                    TerminalKey(sender: sender, label: key) { key }
-                }
-            }
-            HStack(spacing: 7) {
-                TerminalKey(sender: sender, label: "⇧⇥") { "\u{1b}[Z" }
-                    .accessibilityLabel("Shift Tab")
-                TerminalKey(sender: sender, label: "^R") { "\u{12}" }
-                TerminalKey(sender: sender, label: "^U") { "\u{15}" }
-                TerminalKey(sender: sender, label: "^L") { "\u{0c}" }
-                TerminalKey(sender: sender, label: "^Z") { "\u{1a}" }
-                TerminalKey(sender: sender, label: "|") { "|" }
-                TerminalKey(sender: sender, label: "^W") { "\u{17}" }
-            }
-        }
-        .disabled(sender.sessionID == nil)
-        .opacity(sender.sessionID == nil ? 0.45 : 1)
     }
 }
 
