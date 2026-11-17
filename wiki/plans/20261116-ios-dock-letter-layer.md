@@ -266,3 +266,26 @@ q  w  e  r  t  y  u  i  o  p
 
 14. "Can the swiped-up keyboard fill the screen like an input method?" → which: full screen width / overlay the terminal / whole screen → **full screen width**.
 15. The rail's 附件 / 粘贴 under the keyboard: hide them while it is out (recommended) / quick layer full width too with them moved into 更多 → **hide them while it is out**.
+
+## Revisions 3–5 — walkthrough fixes (2026-11-17)
+
+- **R3 (bug)**: on the inner display open wide, the split detail's leading inset is the sidebar's width, and the letter layer ran under the sidebar, hiding its left column. Only an inset no wider than 120 pt (the rail is about 70–90 pt) is reached into; the page's clip opens only on that side.
+- **R4**: z sits under s, as on iOS.
+- **R5**: the z row keeps only `/` left of z (`-` dropped); the bottom row is `ctrl ⌥ space ⏎` with the Mac layout's modifier semantics (tap once, double-tap lock, hold to chord). A modifier finger that turns into a swipe is cancelled and never left held.
+
+Current layout:
+
+```
+1  2  3  4  5  6  7  8  9  0
+q  w  e  r  t  y  u  i  o  p
+  a  s  d  f  g  h  j  k  l
+[ / ] z  x  c  v  b  n  m [ ⌫ ]
+[ctrl][ ⌥ ][     space     ][ ⏎ ]
+```
+
+### Discussion log
+
+16. Duo screenshot, inner display open wide: the letter layer's left keys hid behind the sidebar → fix (R3).
+17. "z should be directly under s" → R4.
+18. "Keep only `/` beside z; space is too long, put keys on either side" → which keys → **"just ctrl and option for now"** → R5.
+19. Asked whether the keyboard could take the system keyboard's place like an input method, only inside Coflux → researched; recorded as `20261117-ios-in-app-keyboard-research` (TODO).
