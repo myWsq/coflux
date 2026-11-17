@@ -128,9 +128,9 @@ struct WorkspaceDetailView: View {
         members.first { $0.id == activeTaskID }
     }
 
-    /// 附件 / 按键 go to the bottom bar (the lower end of the rail on the outer display and in the
-    /// split detail) unless the window lays its bars out horizontally and short: then everything
-    /// stays in the top bar, as in the tall layout.
+    /// The rail layouts: 粘贴 and 附件 are keys of the dock's quick layer, so 更多 leaves them out
+    /// and the rail's lower end stays empty. With horizontal bars (and in the tall layout) they
+    /// stay in 更多.
     private var bottomBarItems: Bool {
         barsOnRail
     }
@@ -706,6 +706,8 @@ struct WorkspaceDetailView: View {
             onKeypadDrag: { keypadDragChanged($0) },
             onKeypadDragEnd: { keypadDragEnded($0) },
             onKeypadToggle: { toggleKeypad() },
+            onPickPhoto: { showingPhotoPicker = true },
+            onPickFile: { showingFilePicker = true },
             onOpenSecret: { openSecretSheet() },
             onCompose: {
                 guard !dictationOverlayVisible else { return }
@@ -818,12 +820,8 @@ struct WorkspaceDetailView: View {
                 .visibilityPriority(.high)
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .visibilityPriority(.high)
-            // The letter layer runs under the rail's lower end: these step aside while it is out.
-            if !lettersOut {
-                ToolbarItem(placement: .bottomBar) { attachMenu }
-                    .visibilityPriority(.low)
-                ToolbarItem(placement: .bottomBar) { pasteButton }
-            }
+            // No bottom-bar items: 粘贴 and 附件 are keys of the dock's quick layer, which runs
+            // under the rail's lower end.
         } else {
             // One 更多 holds 粘贴 and 附件 too: a top bar that runs out of room folds items into
             // the system's own overflow menu, which put 更多 inside another 更多.
@@ -832,27 +830,6 @@ struct WorkspaceDetailView: View {
             ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .visibilityPriority(.high)
         }
-    }
-
-    private var attachMenu: some View {
-        Menu {
-            Button("相册", systemImage: "photo") { showingPhotoPicker = true }
-            Button("文件", systemImage: "folder") { showingFilePicker = true }
-        } label: {
-            Label("附件", systemImage: "paperclip")
-        }
-        .disabled(keySender.sessionID == nil || keySender.uploading)
-        .accessibilityLabel("上传文件到终端")
-    }
-
-    /// 粘贴: plan 071's behaviour — an image on the clipboard is uploaded, text is pasted.
-    private var pasteButton: some View {
-        Button {
-            keySender.paste()
-        } label: {
-            Label("粘贴", systemImage: "doc.on.clipboard")
-        }
-        .disabled(keySender.sessionID == nil || keySender.uploading)
     }
 
     private var newTerminalButton: some View {
@@ -909,11 +886,6 @@ struct WorkspaceDetailView: View {
             open = keypadReveal > keypadHeight / 2
         }
         setKeypad(open: open)
-    }
-
-    /// The dock shows the letter layer: more than half out, the dock's own threshold.
-    private var lettersOut: Bool {
-        keypadHeight > 0 && keypadReveal > keypadHeight / 2
     }
 
     /// VoiceOver's action: swaps to the other layer.
