@@ -3845,6 +3845,68 @@ public struct Coflux_V1_DeviceAnnotationsListed: Sendable {
   public init() {}
 }
 
+/// One canvas. The file's absolute path never leaves the device.
+public struct Coflux_V1_Canvas: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// Unguessable; stable for the same file in the same workspace.
+  public var id: String = String()
+
+  public var title: String = String()
+
+  /// The HTML file's name inside the served directory.
+  public var fileName: String = String()
+
+  /// When the agent last showed it, Unix milliseconds.
+  public var updatedAtMs: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// client→worker (SESSION_CONTROL): the workspace's canvases whose file still exists.
+public struct Coflux_V1_DeviceCanvasList: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var workspaceID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// worker→client (SESSION_CONTROL).
+public struct Coflux_V1_DeviceCanvasListed: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var requestID: String = String()
+
+  public var ok: Bool = false
+
+  public var error: String = String()
+
+  public var revision: UInt32 = 0
+
+  /// The loopback port of the worker's canvas listener; 0 = the listener is not running (the port
+  /// was taken), so no canvas can be loaded.
+  public var port: UInt32 = 0
+
+  public var canvases: [Coflux_V1_Canvas] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// client→worker (SESSION_CONTROL): one change to the workspace's annotations.
 public struct Coflux_V1_DeviceAnnotationsMutate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
@@ -5640,6 +5702,22 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     set {payload = .fsIndexResult(newValue)}
   }
 
+  public var canvasList: Coflux_V1_DeviceCanvasList {
+    get {
+      if case .canvasList(let v)? = payload {return v}
+      return Coflux_V1_DeviceCanvasList()
+    }
+    set {payload = .canvasList(newValue)}
+  }
+
+  public var canvasListed: Coflux_V1_DeviceCanvasListed {
+    get {
+      if case .canvasListed(let v)? = payload {return v}
+      return Coflux_V1_DeviceCanvasListed()
+    }
+    set {payload = .canvasListed(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public enum OneOf_Payload: Equatable, Sendable {
@@ -5735,6 +5813,8 @@ public struct Coflux_V1_DeviceEnvelope: Sendable {
     case fsStatResult(Coflux_V1_DeviceFsStatResult)
     case fsIndex(Coflux_V1_DeviceFsIndex)
     case fsIndexResult(Coflux_V1_DeviceFsIndexResult)
+    case canvasList(Coflux_V1_DeviceCanvasList)
+    case canvasListed(Coflux_V1_DeviceCanvasListed)
 
   }
 
@@ -11303,6 +11383,141 @@ extension Coflux_V1_DeviceAnnotationsListed: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
+extension Coflux_V1_Canvas: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".Canvas"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{3}file_name\0\u{3}updated_at_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.fileName) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.updatedAtMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.title.isEmpty {
+      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
+    }
+    if !self.fileName.isEmpty {
+      try visitor.visitSingularStringField(value: self.fileName, fieldNumber: 3)
+    }
+    if self.updatedAtMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.updatedAtMs, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_Canvas, rhs: Coflux_V1_Canvas) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.title != rhs.title {return false}
+    if lhs.fileName != rhs.fileName {return false}
+    if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceCanvasList: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceCanvasList"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceCanvasList, rhs: Coflux_V1_DeviceCanvasList) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_DeviceCanvasListed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".DeviceCanvasListed"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}ok\0\u{1}error\0\u{1}revision\0\u{1}port\0\u{1}canvases\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.ok) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.revision) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.port) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.canvases) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.ok != false {
+      try visitor.visitSingularBoolField(value: self.ok, fieldNumber: 2)
+    }
+    if !self.error.isEmpty {
+      try visitor.visitSingularStringField(value: self.error, fieldNumber: 3)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt32Field(value: self.revision, fieldNumber: 4)
+    }
+    if self.port != 0 {
+      try visitor.visitSingularUInt32Field(value: self.port, fieldNumber: 5)
+    }
+    if !self.canvases.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.canvases, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_DeviceCanvasListed, rhs: Coflux_V1_DeviceCanvasListed) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.ok != rhs.ok {return false}
+    if lhs.error != rhs.error {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.port != rhs.port {return false}
+    if lhs.canvases != rhs.canvases {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension Coflux_V1_DeviceAnnotationsMutate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceAnnotationsMutate"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}workspace_id\0\u{1}put\0\u{1}delete\0\u{1}reopen\0\u{3}clear_resolved\0\u{1}restore\0")
@@ -13331,7 +13546,7 @@ extension Coflux_V1_ScreenHelperFrame: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DeviceEnvelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0\u{3}screen_session_open\0\u{3}screen_session_opened\0\u{3}screen_session_state\0\u{3}screen_session_close\0\u{3}screen_session_closed\0\u{3}screen_session_resize\0\u{3}screen_session_pause\0\u{3}screen_session_resume\0\u{3}screen_session_detached\0\u{3}screen_session_ended\0\u{3}screen_video_attach\0\u{3}screen_video_attached\0\u{3}screen_video_credit\0\u{3}screen_keyframe_request\0\u{3}screen_video_frame\0\u{3}screen_input\0\u{3}screen_cursor\0\u{3}screen_clipboard_set\0\u{3}screen_clipboard_changed\0\u{3}fs_stat\0\u{3}fs_stat_result\0\u{3}fs_index\0\u{3}fs_index_result\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{3}channel_id\0\u{4}\u{8}local_gateway_hello\0\u{3}local_client_hello\0\u{3}local_auth_result\0\u{4}\u{8}session_catalog_request\0\u{3}session_catalog\0\u{3}exit_ack\0\u{3}session_attach\0\u{3}session_attached\0\u{3}pty_output\0\u{3}pty_gap\0\u{3}pty_input\0\u{3}pty_resize\0\u{3}session_stop\0\u{3}session_detached\0\u{3}session_exited\0\u{3}session_create\0\u{3}operation_ack\0\u{3}session_snapshot_request\0\u{3}session_snapshot\0\u{3}pty_input_ack\0\u{4}\u{4}project_validate\0\u{3}project_validated\0\u{3}worktree_add\0\u{3}worktree_added\0\u{3}worktree_remove\0\u{3}exec_run\0\u{3}exec_result\0\u{3}fs_list\0\u{3}fs_listed\0\u{3}fs_read\0\u{3}fs_read_result\0\u{3}fs_write\0\u{3}fs_write_result\0\u{3}ports_request\0\u{3}ports_result\0\u{1}ping\0\u{1}pong\0\u{2}\u{4}error\0\u{4}\u{a}executor_host_register\0\u{3}executor_host_registered\0\u{3}executor_assign\0\u{3}executor_cancel\0\u{3}executor_report\0\u{3}executor_report_ack\0\u{4}\u{5}loopback_open\0\u{3}loopback_opened\0\u{3}loopback_failed\0\u{3}loopback_data\0\u{3}loopback_ack\0\u{3}loopback_close\0\u{4}\u{5}secret_answer\0\u{3}secret_answer_ack\0\u{4}\u{9}changes_list_request\0\u{3}changes_list\0\u{3}changes_file_request\0\u{3}changes_file\0\u{4}\u{7}annotations_list\0\u{3}annotations_listed\0\u{3}annotations_mutate\0\u{3}annotations_mutated\0\u{3}annotation_image_read\0\u{3}annotation_image_data\0\u{3}annotation_hand_off\0\u{3}annotation_hand_off_result\0\u{4}\u{3}executor_transcript_fragment\0\u{3}executor_transcript_subscribe\0\u{3}executor_transcript_unsubscribe\0\u{3}executor_transcript\0\u{3}executor_stop\0\u{3}screen_session_open\0\u{3}screen_session_opened\0\u{3}screen_session_state\0\u{3}screen_session_close\0\u{3}screen_session_closed\0\u{3}screen_session_resize\0\u{3}screen_session_pause\0\u{3}screen_session_resume\0\u{3}screen_session_detached\0\u{3}screen_session_ended\0\u{3}screen_video_attach\0\u{3}screen_video_attached\0\u{3}screen_video_credit\0\u{3}screen_keyframe_request\0\u{3}screen_video_frame\0\u{3}screen_input\0\u{3}screen_cursor\0\u{3}screen_clipboard_set\0\u{3}screen_clipboard_changed\0\u{3}fs_stat\0\u{3}fs_stat_result\0\u{3}fs_index\0\u{3}fs_index_result\0\u{3}canvas_list\0\u{3}canvas_listed\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -14537,6 +14752,32 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.payload = .fsIndexResult(v)
         }
       }()
+      case 148: try {
+        var v: Coflux_V1_DeviceCanvasList?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .canvasList(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .canvasList(v)
+        }
+      }()
+      case 149: try {
+        var v: Coflux_V1_DeviceCanvasListed?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .canvasListed(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .canvasListed(v)
+        }
+      }()
       default: break
       }
     }
@@ -14921,6 +15162,14 @@ extension Coflux_V1_DeviceEnvelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .fsIndexResult?: try {
       guard case .fsIndexResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 147)
+    }()
+    case .canvasList?: try {
+      guard case .canvasList(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 148)
+    }()
+    case .canvasListed?: try {
+      guard case .canvasListed(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 149)
     }()
     case nil: break
     }

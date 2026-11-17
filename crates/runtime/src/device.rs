@@ -33,6 +33,7 @@ use crate::agent_ctl::executor::{
     RunCaller as ExecutorRunCaller, RunRecord as ExecutorRun, TranscriptBatch,
 };
 use crate::annotations::AnnotationStore;
+use crate::canvas::CanvasStore;
 use crate::device_loopback::{self, LoopbackTable};
 use crate::executor_host::{Inbound as ExecutorHostInbound, LOCAL_CHANNEL_ID as EXECUTOR_LOCAL_CHANNEL};
 use crate::local_auth::{AuthenticatedLocal, LocalAuth, LocalPrincipal};
@@ -960,6 +961,9 @@ pub struct DeviceRuntime {
     /// Browser annotations (plan 20260929-browser-annotations): the per-workspace store under
     /// `$COFLUX_HOME/annotations`. Present in production only (it needs the home directory).
     annotations: Option<Arc<AnnotationStore>>,
+    /// Canvases (plan 20261112-agent-canvas): the per-workspace registry under
+    /// `$COFLUX_HOME/canvases`. Present in production only, like the annotation store.
+    canvases: Option<Arc<CanvasStore>>,
     /// The remote screen helper bridge (plan 20260929-remote-desktop), attached by main once the
     /// runtime exists; absent on devices without the helper (Linux, headless installs).
     screen: std::sync::OnceLock<Arc<screen::Bridge>>,
@@ -1026,6 +1030,9 @@ impl DeviceRuntime {
         let annotations = services
             .as_ref()
             .map(|services| Arc::new(AnnotationStore::new(&services.cfg.home, to_server.clone())));
+        let canvases = services
+            .as_ref()
+            .map(|services| Arc::new(CanvasStore::new(&services.cfg.home, to_server.clone())));
         let aggregate_queue = AggregateQueueBudget::new(
             aggregate_byte_limit,
             channel_limit.saturating_mul(CHANNEL_GAP_FRAME_BYTES),
@@ -1067,6 +1074,7 @@ impl DeviceRuntime {
             loopback_connections: Arc::new(AtomicUsize::new(0)),
             secrets,
             annotations,
+            canvases,
             screen: std::sync::OnceLock::new(),
         })
     }
@@ -1403,6 +1411,11 @@ impl DeviceRuntime {
     /// The worker's browser annotation store (plan 20260929-browser-annotations).
     pub fn annotations(&self) -> Option<&Arc<AnnotationStore>> {
         self.annotations.as_ref()
+    }
+
+    /// The worker's canvas registry (plan 20261112-agent-canvas).
+    pub fn canvases(&self) -> Option<&Arc<CanvasStore>> {
+        self.canvases.as_ref()
     }
 
     /// 精确 control exit 和 catalog tombstone 共用的可靠上报入口。
@@ -2416,6 +2429,33 @@ impl DeviceRuntime {
         self.annotations
             .clone()
             .ok_or_else(|| "annotations are unavailable on this worker".to_string())
+    }
+
+    /// The workspace's canvases and the port a desktop loads them from (plan
+    /// 20261112-agent-canvas). Absolute paths stay on the device.
+    async fn canvas_list(&self, request: wire::DeviceCanvasList) -> device_envelope::Payload {
+        let workspace_id = request.workspace_id.clone();
+        let outcome = match self.canvases.clone() {
+            Some(store) => blocking(move || {
+                let (revision, list) = store.list(&workspace_id)?;
+                let canvases: Vec<wire::Canvas> = list.iter().map(|canvas| canvas.to_wire()).collect();
+                Ok((revision, store.port(), canvases))
+            })
+            .await,
+            None => Err("canvases are unavailable on this worker".to_string()),
+        };
+        let (ok, error, revision, port, canvases) = match outcome {
+            Ok((revision, port, canvases)) => (true, String::new(), revision, port, canvases),
+            Err(error) => (false, error, 0, 0, Vec::new()),
+        };
+        device_envelope::Payload::CanvasListed(wire::DeviceCanvasListed {
+            request_id: request.request_id,
+            ok,
+            error,
+            revision,
+            port,
+            canvases,
+        })
     }
 
     async fn annotations_list(&self, request: wire::DeviceAnnotationsList) -> device_envelope::Payload {
@@ -3809,6 +3849,7 @@ impl DeviceRuntime {
             device_envelope::Payload::AnnotationsList(request) => {
                 self.annotations_list(request).await
             }
+            device_envelope::Payload::CanvasList(request) => self.canvas_list(request).await,
             device_envelope::Payload::AnnotationsMutate(request) => {
                 self.annotations_mutate(request).await
             }
@@ -5061,6 +5102,7 @@ fn clear_request_id(payload: &mut device_envelope::Payload) {
         device_envelope::Payload::ChangesListRequest(value) => value.request_id.clear(),
         device_envelope::Payload::ChangesFileRequest(value) => value.request_id.clear(),
         device_envelope::Payload::AnnotationsList(value) => value.request_id.clear(),
+        device_envelope::Payload::CanvasList(value) => value.request_id.clear(),
         device_envelope::Payload::AnnotationsMutate(value) => value.request_id.clear(),
         device_envelope::Payload::AnnotationImageRead(value) => value.request_id.clear(),
         device_envelope::Payload::AnnotationHandOff(value) => value.request_id.clear(),
@@ -5099,6 +5141,7 @@ fn set_response_request_id(payload: &mut device_envelope::Payload, request_id: &
         device_envelope::Payload::AnnotationsListed(value) => {
             value.request_id = request_id.to_string()
         }
+        device_envelope::Payload::CanvasListed(value) => value.request_id = request_id.to_string(),
         device_envelope::Payload::AnnotationsMutated(value) => {
             value.request_id = request_id.to_string()
         }
@@ -5226,6 +5269,8 @@ fn required_scope(payload: &device_envelope::Payload) -> Option<DeviceScope> {
         | device_envelope::Payload::AnnotationsMutate(_)
         | device_envelope::Payload::AnnotationImageRead(_)
         | device_envelope::Payload::AnnotationHandOff(_) => Some(DeviceScope::SessionControl),
+        // Canvases (plan 20261112-agent-canvas): the same reasoning as annotations.
+        device_envelope::Payload::CanvasList(_) => Some(DeviceScope::SessionControl),
         // Remote screen (plan 20260929-remote-desktop): RPC, like the loopback tunnel — RPC already
         // allows `exec` of anything on the device, so seeing and driving its screen widens nothing.
         device_envelope::Payload::ScreenSessionOpen(_)
@@ -5277,7 +5322,8 @@ fn response_required_scope(payload: &device_envelope::Payload) -> Option<DeviceS
         device_envelope::Payload::AnnotationsListed(_)
         | device_envelope::Payload::AnnotationsMutated(_)
         | device_envelope::Payload::AnnotationImageData(_)
-        | device_envelope::Payload::AnnotationHandOffResult(_) => Some(DeviceScope::SessionControl),
+        | device_envelope::Payload::AnnotationHandOffResult(_)
+        | device_envelope::Payload::CanvasListed(_) => Some(DeviceScope::SessionControl),
         device_envelope::Payload::ScreenSessionOpened(_)
         | device_envelope::Payload::ScreenSessionState(_)
         | device_envelope::Payload::ScreenSessionClosed(_)
@@ -5325,6 +5371,7 @@ fn request_id(payload: &device_envelope::Payload) -> Option<String> {
         // Only so a scope refusal reaches the waiting answer; answers never enter the call ledger.
         device_envelope::Payload::SecretAnswer(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationsList(value) => Some(value.request_id.clone()),
+        device_envelope::Payload::CanvasList(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationsMutate(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationImageRead(value) => Some(value.request_id.clone()),
         device_envelope::Payload::AnnotationHandOff(value) => Some(value.request_id.clone()),

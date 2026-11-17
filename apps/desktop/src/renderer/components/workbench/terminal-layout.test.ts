@@ -6,6 +6,7 @@ import {
   EMPTY_LAYOUT,
   activateTab,
   activeTabIds,
+  appendBackgroundTab,
   beginPendingTab,
   createLayout,
   dropPendingTab,
@@ -525,4 +526,16 @@ test("browser tabs survive storage and parsing; restore prunes the ones without 
   const allGone = pruneBrowserTabs(restored, () => false);
   assert.deepEqual(tabsInOrder(allGone), [["a"]]);
   assert.equal(pruneBrowserTabs(restored, () => true), restored);
+});
+
+test("a background tab joins the focused group without becoming its active tab", () => {
+  const canvasTab = `${BROWSER_TAB_PREFIX}canvas`;
+  const layout = createLayout(["t1", "t2"]);
+  const added = appendBackgroundTab(layout, canvasTab);
+  const group = focusedGroup(added);
+  assert.deepEqual(group.tabs, ["t1", "t2", canvasTab]);
+  assert.equal(group.activeTabId, "t1");
+  // Already in the layout: nothing changes. An empty group takes it as its active tab.
+  assert.equal(appendBackgroundTab(added, canvasTab), added);
+  assert.equal(focusedGroup(appendBackgroundTab(EMPTY_LAYOUT, canvasTab)).activeTabId, canvasTab);
 });

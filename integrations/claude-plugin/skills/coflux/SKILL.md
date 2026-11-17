@@ -1,6 +1,6 @@
 ---
 name: coflux
-description: Works inside a Coflux terminal and across the devices of the account. Locates the session (coflux-session block, COFLUX_* variables, coflux workspace), opens terminals the user can see and take over, runs commands in them, waits, reads scrollback, types into them, reports progress, notifies the user, lists preview URLs, hands a bounded sub-task to the built-in executor, implements the user's browser annotations and diff comments, and reaches other workspaces and devices through the account CLI (worktrees, remote terminals, one-shot device exec, project import). Use when running in a Coflux terminal, or when a task involves coflux, a workspace or worktree the user watches, a step only a human can type (password, confirmation, TUI), a dev server or test run the user should see, progress or notifications, preview URLs, annotations, the executor, or another machine in the account. Prefers zero-credential local commands in the current workspace; uses the account CLI across workspaces and devices.
+description: Works inside a Coflux terminal and across the devices of the account. Locates the session (coflux-session block, COFLUX_* variables, coflux workspace), opens terminals the user can see and take over, runs commands in them, waits, reads scrollback, types into them, reports progress, notifies the user, lists preview URLs, shows the user an HTML page (a mockup, a comparison, research results) as a canvas in their desktop, hands a bounded sub-task to the built-in executor, implements the user's browser annotations and diff comments, and reaches other workspaces and devices through the account CLI (worktrees, remote terminals, one-shot device exec, project import). Use when running in a Coflux terminal, or when a task involves coflux, a workspace or worktree the user watches, a step only a human can type (password, confirmation, TUI), a dev server or test run the user should see, progress or notifications, preview URLs, a mockup or visual result the user should look at, annotations, the executor, or another machine in the account. Prefers zero-credential local commands in the current workspace; uses the account CLI across workspaces and devices.
 ---
 
 # Working inside coflux
@@ -13,11 +13,11 @@ workspaces and devices.**
 
 | Track | Credentials | Reach | Use for |
 |---|---|---|---|
-| Local commands `coflux terminal/progress/notify/ports/executor/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, the user's browser annotations and code comments, a bounded sub-task for the built-in executor: the default |
+| Local commands `coflux terminal/progress/notify/ports/canvas/executor/annotations` | none (the daemon identifies you by process tree) | **the workspace your cwd is in** | open, run, wait, read, send, close, report progress, call the user, preview URLs, showing the user an HTML page, the user's browser annotations and code comments, a bounded sub-task for the built-in executor: the default |
 | Account CLI | app login or `coflux login` | all devices and workspaces in the account | child workspaces, remote terminals, one-shot commands on another device; JSON output |
 
 You only ever talk to the local daemon. `run`/`wait`/`read`/`send`/`close`/`progress`/`executor`/
-`annotations` complete inside it and never touch the center. `new`/`list`/`ports`/`notify` and the
+`annotations`/`canvas` complete inside it and never touch the center. `new`/`list`/`ports`/`notify` and the
 account commands need the daemon connected to the center (terminals and notification history are
 persisted centrally, preview URLs are minted by the center; "letting the user see" is their whole
 point) and fail loudly rather than degrade silently when it is not.
@@ -265,6 +265,18 @@ coflux ports
 
 Lists every listening port in this workspace with its public preview URL. After starting a dev
 server, use it to get the URL and tell the user directly; they click it and nobody has to dig.
+
+### Show the user an HTML page
+
+```sh
+coflux canvas show wiki/plans/home-redesign-mockup.html --title "Home redesign"
+```
+
+Opens the file as a canvas: a tab in the user's Coflux desktop, in the workspace your cwd is in.
+Use it when the result is something to look at — a design mockup, options side by side, research
+findings — instead of starting a server and asking the user to open an address. The command
+returns at once. Read [references/canvas.md](references/canvas.md) before using it: what the page
+may load, how to revise it, and how the user's feedback comes back.
 
 ### Hand a bounded sub-task to the executor
 

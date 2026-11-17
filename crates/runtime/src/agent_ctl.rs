@@ -173,6 +173,12 @@ pub enum AgentAction {
     /// `coflux annotations resolve <id> --note`: the agent implemented it; the desktops show the
     /// note and wait for the user to confirm or reopen.
     AnnotationsResolve { annotation_id: String, note: String },
+    /// `coflux canvas show <file.html>` (plan 20261112-agent-canvas): register the file as a
+    /// canvas of the effective workspace, or refresh the one it already is. A relative path is
+    /// resolved against the caller's cwd. Purely local.
+    CanvasShow { path: String, title: String },
+    /// `coflux canvas list`: the effective workspace's canvases.
+    CanvasList,
 }
 
 pub struct AgentResponse {
@@ -590,6 +596,107 @@ async fn handle(
         AgentAction::AnnotationsResolve { annotation_id, note } => {
             annotations_resolve(device, &scope, annotation_id, note).await
         }
+        AgentAction::CanvasShow { path, title } => canvas_show(device, &scope, &cwd, path, title).await,
+        AgentAction::CanvasList => canvas_list(device, &scope).await,
+    }
+}
+
+/// The effective workspace and the registry a canvas command works on.
+fn canvas_target(
+    device: &Arc<DeviceRuntime>,
+    scope: &WorkspaceScope,
+) -> Result<(String, Arc<crate::canvas::CanvasStore>), AgentResponse> {
+    let workspace = scope.require_effective()?.to_string();
+    let store = device
+        .canvases()
+        .cloned()
+        .ok_or_else(|| AgentResponse::err("503 Service Unavailable", "canvases are unavailable on this worker"))?;
+    Ok((workspace, store))
+}
+
+fn canvas_json(store: &crate::canvas::CanvasStore, canvas: &crate::canvas::StoredCanvas) -> serde_json::Value {
+    serde_json::json!({
+        "id": canvas.id,
+        "title": canvas.title,
+        "path": canvas.path,
+        "updatedAt": canvas.updated_at,
+        // Absent while the canvas listener is not running.
+        "url": store.url(canvas),
+    })
+}
+
+async fn canvas_show(
+    device: &Arc<DeviceRuntime>,
+    scope: &WorkspaceScope,
+    cwd: &str,
+    path: String,
+    title: String,
+) -> AgentResponse {
+    let (workspace, store) = match canvas_target(device, scope) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let requested = std::path::PathBuf::from(path.trim());
+    let absolute = if requested.is_absolute() {
+        requested
+    } else if cwd.is_empty() {
+        return AgentResponse::err(
+            "400 Bad Request",
+            "a relative path needs the caller's cwd; pass an absolute path",
+        );
+    } else {
+        std::path::Path::new(cwd).join(requested)
+    };
+    let scope_path = scope.effective_path.clone().unwrap_or_default();
+    let shown = tokio::task::spawn_blocking(move || {
+        let title = title.trim();
+        let canvas = store.show(&workspace, &absolute, (!title.is_empty()).then_some(title))?;
+        // Registered, but with no listener the desktop cannot load it: say so instead of
+        // reporting a success nobody will see.
+        if store.port() == 0 {
+            return Err(format!(
+                "the canvas was registered, but this device's canvas listener is not running (port {} is taken; set COFLUX_CANVAS_PORT and restart the runtime)",
+                coflux_protocol::CANVAS_PORT
+            ));
+        }
+        Ok(serde_json::json!({
+            "workspaceId": workspace,
+            "ref": handle::of(HandleKind::Workspace, &workspace),
+            "path": scope_path,
+            "canvas": canvas_json(&store, &canvas),
+        }))
+    })
+    .await
+    .unwrap_or_else(|_| Err("the canvas store task failed".into()));
+    match shown {
+        Ok(payload) => AgentResponse::ok(payload),
+        Err(error) => AgentResponse::err("400 Bad Request", error),
+    }
+}
+
+async fn canvas_list(device: &Arc<DeviceRuntime>, scope: &WorkspaceScope) -> AgentResponse {
+    let (workspace, store) = match canvas_target(device, scope) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let scope_path = scope.effective_path.clone().unwrap_or_default();
+    let listed = tokio::task::spawn_blocking(move || {
+        store.list(&workspace).map(|(revision, list)| {
+            let canvases: Vec<serde_json::Value> = list.iter().map(|canvas| canvas_json(&store, canvas)).collect();
+            serde_json::json!({
+                "workspaceId": workspace,
+                "ref": handle::of(HandleKind::Workspace, &workspace),
+                "path": scope_path,
+                "revision": revision,
+                "canvases": canvases,
+            })
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err("the canvas store task failed".into()));
+    match listed {
+        Ok(payload) => AgentResponse::ok(payload),
+        Err(error) => AgentResponse::err("500 Internal Server Error", error),
     }
 }
 

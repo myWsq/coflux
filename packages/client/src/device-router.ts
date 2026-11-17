@@ -15,6 +15,7 @@ import {
   type DeviceAnnotationHandOffResult,
   type DeviceAnnotationImageData,
   type DeviceAnnotationsListed,
+  type DeviceCanvasListed,
   type DeviceAnnotationsMutate,
   type DeviceAnnotationsMutated,
   type DeviceEnvelope,
@@ -95,6 +96,9 @@ const FS_INDEX_TIMEOUT_MS = 45_000;
  * 20260929-browser-annotations). Only ever derived from the worker's own request-id-less
  * `empty_payload` reply, never from a timeout: a timeout means unreachable or slow. */
 export const ANNOTATIONS_UNSUPPORTED = "annotations_unsupported";
+/** The error code of a canvas request a device's worker does not support (plan
+ * 20261112-agent-canvas); derived like ANNOTATIONS_UNSUPPORTED, never from a timeout. */
+export const CANVAS_UNSUPPORTED = "canvas_unsupported";
 /** The error code of an annotation request whose frame could not fit in one Device frame; refused
  * before sending, because a frame `sendOn` cannot send tears the whole session lane down. */
 export const ANNOTATION_FRAME_TOO_LARGE = "annotation_frame_too_large";
@@ -362,6 +366,9 @@ interface DeviceRoute {
   /** Further `empty_payload` replies still expected on that generation for annotation requests that
    * were already failed together with the first one; swallowed, never shown as a generic error. */
   annotationStrayErrors?: { generation: bigint; count: number };
+  /** The same two facts for canvas requests (plan 20261112-agent-canvas). */
+  canvasUnsupportedGeneration?: bigint;
+  canvasStrayErrors?: { generation: bigint; count: number };
   /** Where the worker answered `fsStat` with its request-id-less `empty_payload` (plan
    * 20261001-terminal-file-tab): the elevated-lane generation it arrived on and the session-lane
    * generation active at that moment. While either is still the active channel of its lane, later
@@ -1582,6 +1589,10 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     // 归因后顺手关掉这条 route 的心跳：在旧 daemon 上它永远不会成功，再发只是白费往返。
     // Browser annotations (plan 20260929-browser-annotations) are attributed the same way, first:
     // an older worker answers each annotation request with a request-id-less `empty_payload`.
+    // Canvases (plan 20261112-agent-canvas) are newer than annotations, so they are attributed
+    // first: the workers in the field know annotations and lack only the canvas list, and a worker
+    // that lacks both answers each request with its own error (the second lands on annotations).
+    if (!requestId && code === "empty_payload" && attributeCanvasUnsupported(route, channel)) return true;
     if (!requestId && code === "empty_payload" && attributeAnnotationsUnsupported(route, channel)) return true;
     // Executor viewer frames (plan 20260929-executor-pip) are attributed the same way, ahead of the
     // heartbeat: they are long-lived frames outside pendingRequests, so the route keeps its own
@@ -1728,6 +1739,28 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     route.annotationStrayErrors = { generation: channel.generation, count: sent.length - 1 };
     for (const entry of pending) finishPendingWithError(route, entry, annotationsUnsupportedError());
     return true;
+  }
+
+  /** The canvas twin of attributeAnnotationsUnsupported (plan 20261112-agent-canvas). */
+  function attributeCanvasUnsupported(route: DeviceRoute, channel: DeviceChannel): boolean {
+    const stray = route.canvasStrayErrors;
+    if (stray && stray.generation === channel.generation && stray.count > 0) {
+      stray.count -= 1;
+      return true;
+    }
+    const pending = [...route.pendingRequests.values()].filter((entry) => entry.payload.case === "canvasList");
+    const sent = pending.filter((entry) => entry.sentGeneration === channel.generation);
+    if (sent.length === 0) return false;
+    if (route.pendingPing && !route.heartbeatConfirmed) return false;
+    route.canvasUnsupportedGeneration = channel.generation;
+    route.canvasStrayErrors = { generation: channel.generation, count: sent.length - 1 };
+    for (const entry of pending) finishPendingWithError(route, entry, canvasUnsupportedError());
+    return true;
+  }
+
+  function canvasUnsupportedNow(route: DeviceRoute): boolean {
+    const generation = route.canvasUnsupportedGeneration;
+    return generation !== undefined && route.sessionLane.active?.generation === generation;
   }
 
   function annotationsUnsupportedNow(route: DeviceRoute): boolean {
@@ -2676,6 +2709,22 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     throw unexpectedResponse("annotationsListed", response);
   }
 
+  /** A workspace's canvases (plan 20261112-agent-canvas): SESSION_CONTROL on the session lane with
+   * a transient demand, like the annotation list. An older worker fails it with CANVAS_UNSUPPORTED. */
+  async function listCanvases(daemonId: string, workspaceId: string): Promise<DeviceCanvasListed> {
+    const route = routeFor(daemonId);
+    if (canvasUnsupportedNow(route)) throw canvasUnsupportedError();
+    route.transientDemand += 1;
+    try {
+      const response = await request(daemonId, DeviceScope.SESSION_CONTROL, { case: "canvasList", value: { requestId: randomUUID(), workspaceId } }, DEVICE_REQUEST_TIMEOUT_MS);
+      if (response.case === "canvasListed") return response.value;
+      throw unexpectedResponse("canvasListed", response);
+    } finally {
+      route.transientDemand = Math.max(0, route.transientDemand - 1);
+      releaseIdle(route);
+    }
+  }
+
   async function mutateAnnotations(
     daemonId: string,
     workspaceId: string,
@@ -3017,6 +3066,7 @@ export function createDeviceRouter(options: DeviceRouterOptions) {
     requestPorts,
     answerSecret,
     listAnnotations,
+    listCanvases,
     mutateAnnotations,
     readAnnotationImage,
     handOffAnnotations,
@@ -3055,6 +3105,7 @@ function requestIdOf(payload: RuntimeDevicePayload): string | undefined {
     case "annotationsMutate":
     case "annotationImageRead":
     case "annotationHandOff":
+    case "canvasList":
       return payload.value.requestId;
     default:
       return undefined;
@@ -3088,6 +3139,7 @@ function responseRequestId(payload: RuntimeDevicePayload): string | undefined {
     case "annotationsMutated":
     case "annotationImageData":
     case "annotationHandOffResult":
+    case "canvasListed":
       return payload.value.requestId;
     case "error":
       return payload.value.requestId;
@@ -3128,6 +3180,10 @@ function fsOutdatedError(): Error {
 /** The worker predates `fsIndex` (plan 20261002-workspace-files-view). */
 function fsIndexOutdatedError(): Error {
   return new DeviceRouteError(FILE_INDEX_DAEMON_OUTDATED_MESSAGE, DAEMON_OUTDATED_CODE);
+}
+
+function canvasUnsupportedError(): Error {
+  return new DeviceRouteError("该设备的 coflux 版本过旧，不支持画布", CANVAS_UNSUPPORTED);
 }
 
 function annotationsUnsupportedError(): Error {

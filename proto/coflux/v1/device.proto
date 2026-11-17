@@ -1362,6 +1362,46 @@ message DeviceAnnotationsListed {
   bool code_comments = 6;
 }
 
+// ===== Canvases (plan 20261112-agent-canvas) =====
+//
+// A canvas is an HTML file an agent showed with `coflux canvas show`. The worker keeps a
+// per-workspace registry and serves each canvas's directory on a dedicated loopback HTTP listener;
+// a desktop loads `http://localhost:<port>/<id>/<file_name>` in a browser tab (reaching a remote
+// device through the loopback tunnel). The list requires DEVICE_SCOPE_SESSION_CONTROL like
+// annotations, so a local workspace's canvases keep working while the center is unreachable. A
+// worker that predates these payloads decodes them as an empty oneof and answers
+// DeviceError{code:"empty_payload", request_id: unset}; clients treat exactly that as "the device's
+// worker does not support canvases".
+
+// One canvas. The file's absolute path never leaves the device.
+message Canvas {
+  // Unguessable; stable for the same file in the same workspace.
+  string id = 1;
+  string title = 2;
+  // The HTML file's name inside the served directory.
+  string file_name = 3;
+  // When the agent last showed it, Unix milliseconds.
+  uint64 updated_at_ms = 4;
+}
+
+// client→worker (SESSION_CONTROL): the workspace's canvases whose file still exists.
+message DeviceCanvasList {
+  string request_id = 1;
+  string workspace_id = 2;
+}
+
+// worker→client (SESSION_CONTROL).
+message DeviceCanvasListed {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+  uint32 revision = 4;
+  // The loopback port of the worker's canvas listener; 0 = the listener is not running (the port
+  // was taken), so no canvas can be loaded.
+  uint32 port = 5;
+  repeated Canvas canvases = 6;
+}
+
 // client→worker (SESSION_CONTROL): one change to the workspace's annotations.
 message DeviceAnnotationsMutate {
   string request_id = 1;
@@ -1912,5 +1952,7 @@ message DeviceEnvelope {
     DeviceFsStatResult fs_stat_result = 145;
     DeviceFsIndex fs_index = 146;
     DeviceFsIndexResult fs_index_result = 147;
+    DeviceCanvasList canvas_list = 148;
+    DeviceCanvasListed canvas_listed = 149;
   }
 }
