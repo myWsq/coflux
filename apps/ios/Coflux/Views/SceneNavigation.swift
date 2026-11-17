@@ -74,8 +74,29 @@ final class SceneNavigation {
     /// Terminals whose agent finished its turn and that the user has looked at since (the
     /// desktop's `seen`): Clawd stands still on them instead of throwing confetti, on the tabs
     /// and on home. The terminal page adds the active one; the shell forgets a terminal once
-    /// its agent is no longer finished.
+    /// its agent is no longer finished. The optimistic half of the account-wide mark: read it
+    /// through `isTurnSeen`, which adds the centre's `SessionAgentRef.seen`.
     var seenFinishedTaskIDs: Set<String> = []
+
+    /// Whether a terminal's finished turn counts as looked at (plan 20261111-agent-seen-sync):
+    /// some client of the account reported it (`centreSeen`), or this app did.
+    func isTurnSeen(taskID: String?, centreSeen: Bool) -> Bool {
+        centreSeen || (taskID.map { seenFinishedTaskIDs.contains($0) } ?? false)
+    }
+
+    /// Bumped by every `show`: the home and the sidebar answer it by expanding the shown
+    /// workspace's project, without scrolling (after the desktop's `revealNonce`, plan
+    /// 20261115-ios-current-section). A counter, not the selection, so showing the workspace that
+    /// is already selected — its project collapsed by hand since — reveals it again.
+    private(set) var revealNonce = 0
+    /// The reveal this window last carried out, so a surface rebuilt by a layout change does not
+    /// undo a project the user collapsed since.
+    var handledReveal: RevealKey?
+
+    struct RevealKey: Equatable {
+        let nonce: Int
+        let projectID: String
+    }
 
     struct PendingTerminal: Equatable {
         let workspaceID: String
@@ -109,6 +130,7 @@ final class SceneNavigation {
         if let taskID { activeTaskByWorkspace[workspaceID] = taskID }
         self.workspaceID = workspaceID
         overlayVisibility = .detailOnly
+        revealNonce += 1
     }
 
     /// A device row of the sidebar: that device's terminal page. Kept as the 设备 stack's path,
@@ -138,5 +160,6 @@ final class SceneNavigation {
         overlayVisibility = .detailOnly
         pendingTerminal = nil
         seenFinishedTaskIDs = []
+        handledReveal = nil
     }
 }

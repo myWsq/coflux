@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { Bot, FolderTree, GitBranch, Globe, History, LoaderCircle, PanelsTopLeft, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, History, LoaderCircle, PanelsTopLeft, Plus, Sparkles, SquareTerminal, Unplug, X } from "lucide-react";
 import { TaskStatus, type Task } from "@coflux/protocol";
 
 import { Button } from "@astryxdesign/core/Button";
@@ -18,8 +18,8 @@ import { SHORTCUT_MODIFIER_PREFIX } from "@/components/workbench/shortcut-modifi
 import { ClaudeTabCard } from "@/components/workbench/terminal-recap-card";
 import { isDirWorkspace as isDirWorkspaceOf, type CanvasEntry, type CofluxClient } from "@coflux/client";
 import { cn } from "@/lib/utils";
-import { ClawdGlyph } from "@/components/workbench/clawd-glyph";
-import { AgentLogo, CodexLogo } from "@/components/settings/agent-logos";
+import { AgentGlyph } from "@/components/workbench/agent-glyph";
+import { AgentLogo } from "@/components/settings/agent-logos";
 import { effectiveAgents, type AgentId, type EffectiveAgent } from "@/components/settings/agent-settings";
 import { useAgentSettings } from "@/components/settings/agent-settings-store";
 import { hostLabel } from "@/components/workbench/browser-address";
@@ -57,48 +57,6 @@ import {
   type TerminalLayout,
 } from "@/components/workbench/terminal-layout";
 import { shouldActivateChangesView } from "@/components/workbench/workbench-state";
-
-/** Tab 上的 agent 图标（plan 075）：claude 用 Clawd 像素小动物并按状态换姿态；
- * 干活健身、待批准/待回答挥旗、未读完成撒花；看过完成态后冻成 gym 第 0 帧站姿。
- * Codex shows its logo (plan 20261001-desktop-agents) and any other agent the lucide robot, both
- * with the state tints (approval/question→warning, error→destructive, done→success, as in the
- * sidebar). Clawd has no pose for a program stopped on an error, so claude shows the sidebar's
- * red error cross instead: no Clawd pose reads apart from both done and waiting. */
-function AgentGlyph({
-  agent,
-  state,
-  seen,
-  className,
-}: {
-  agent: string;
-  state: string;
-  /** 完成态已被用户看过（点开过该 tab）→ 不再撒花。 */
-  seen?: boolean;
-  className?: string;
-}) {
-  if (agent === "claude") {
-    if (state === "error") return <ActivityDots status="error" />;
-    const pose =
-      state === "active"
-        ? "active"
-        : state === "approval" || state === "question"
-          ? "raise"
-          : (state === "done" || state === "waiting") && !seen
-            ? "rest"
-            : "idle";
-    return <ClawdGlyph pose={pose} className={className} />;
-  }
-  const tone =
-    state === "approval" || state === "question"
-      ? "text-warning"
-      : state === "error"
-        ? "text-destructive"
-        : state === "done"
-          ? "text-success"
-          : "";
-  if (agent === "codex") return <CodexLogo className={cn("size-3 shrink-0", tone, className)} />;
-  return <Bot className={cn("size-3 shrink-0", tone, className)} />;
-}
 
 /** Drag payload type of a terminal tab. Deliberately not a file type: a tab dropped on a pane must never upload anything. */
 const TAB_DRAG_TYPE = "application/x-coflux-terminal-tab";
@@ -596,6 +554,9 @@ export function WorkspaceTerminal({
   const fileTabs = useStore(files.tabs, (state) => state.tabs);
   // agent presence（plan 073/075）：引用只在实际变化时更新（worker 变化才发），直接订阅。
   const sessionAgents = useStore(client.store, (state) => state.sessionAgents);
+  // A finished turn stops throwing confetti once it is seen anywhere on the account, or here
+  // (plan 20261111-agent-seen-sync); the workbench reports what is on screen.
+  const seenSessions = useStore(client.store, (state) => state.seenSessions);
   // Executor runs (plan 20260929-executor-pip): a tab whose terminal delegated a sub-task shows an
   // activity indicator while it is not on screen. The map only changes with a center snapshot.
   const executorRuns = useStore(client.store, (state) => state.executorRuns);
@@ -622,8 +583,6 @@ export function WorkspaceTerminal({
 
   /** 切换分支中：目标分支名（按钮 pending 态；成功由 daemon 上报驱动 branch 变更后自动清除） */
   const [pendingBranch, setPendingBranch] = useState<string | null>(null);
-  // 完成态看过一次就不再撒花：按 sessionId 记，下一轮又干活时清掉。
-  const [seenDone, setSeenDone] = useState<ReadonlySet<string>>(() => new Set());
   // Tab drag (plan 20260923-terminal-split-groups): the dragged task, and where it would land.
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -710,30 +669,6 @@ export function WorkspaceTerminal({
   const pending = layout.pending ?? null;
   const geometry = layoutGeometry(layout);
   const singleGroup = geometry.groups.length === 1;
-
-  // Which finished agents have been seen, as of this render: a session is forgotten once its agent
-  // works again, and marked seen when its tab is on screen (this workspace is shown, the changes
-  // overlay is closed, and it is its group's active tab). Adjusted during render; the tabs below
-  // render from `seenNow`.
-  let seenNext = seenDone;
-  for (const { group } of geometry.groups) {
-    for (const taskId of group.tabs) {
-      if (isBrowserTabId(taskId)) continue;
-      const sessionId = taskById.get(taskId)?.sessionId;
-      if (!sessionId) continue;
-      const agentState = sessionAgents[sessionId]?.state;
-      const done = agentState === "done" || agentState === "waiting";
-      if (agentState && !done && seenNext.has(sessionId)) {
-        const next = new Set(seenNext);
-        next.delete(sessionId);
-        seenNext = next;
-      } else if (done && active && !changesOpen && group.activeTabId === taskId && !seenNext.has(sessionId)) {
-        seenNext = new Set(seenNext).add(sessionId);
-      }
-    }
-  }
-  if (seenNext !== seenDone) setSeenDone(seenNext);
-  const seenNow = seenNext;
 
   function endDrag() {
     setDragTaskId(null);
@@ -1007,7 +942,7 @@ export function WorkspaceTerminal({
     const launchedAgent = agentTabs[task.id];
     const sessionId = task.sessionId;
     const agentState = agentEntry?.state;
-    const tabSeenDone = Boolean(sessionId && seenNow.has(sessionId));
+    const tabSeenDone = Boolean(sessionId && client.isTurnSeen(agentEntry, seenSessions, sessionId));
     // OSC 标题非空即覆盖显示；EXITED 后 sessionId 清空 → 自动回落 task.title。
     const tabTitle = (task.sessionId && checkpointTitles[task.sessionId]) || task.title;
     // Moving a group's only tab into a new group beside that group would leave nothing behind.

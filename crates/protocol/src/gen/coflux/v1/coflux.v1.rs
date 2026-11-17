@@ -136,7 +136,7 @@ pub struct PortPreview {
 }
 /// worker 周期扫描存活会话 PTY 进程树检测到的 agent CLI（plan 073）。
 /// 派生运行时事实：server 只做内存镜像 + 广播，不落库；daemon 断开即全部清空。
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionAgentRef {
     #[prost(string, tag="1")]
     pub session_id: ::prost::alloc::string::String,
@@ -167,6 +167,17 @@ pub struct SessionAgentRef {
     /// 随条目消失一起清掉；旧 worker 不发 = 空串 = 该终端没有纸面可看。
     #[prost(string, tag="7")]
     pub agent_session_id: ::prost::alloc::string::String,
+    /// Set only by the centre on fan-out: true once any client of the account reported this finished
+    /// turn ("done"/"waiting") as looked at (SessionSeen). The mark lives in the centre's memory and is
+    /// cleared when the agent starts another turn or its session id changes. Daemons never set it and
+    /// the centre ignores it on input.
+    #[prost(bool, tag="8")]
+    pub seen: bool,
+    /// Milliseconds since the epoch at which this entry's `state` was entered, on the daemon's clock.
+    /// Set by the daemon and copied unchanged by the centre. It identifies "the same turn" and is
+    /// compared only for equality, never against another clock. 0 = not reported (older daemon).
+    #[prost(double, tag="9")]
+    pub state_since: f64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskPorts {
@@ -3980,7 +3991,7 @@ pub struct OAuthAuthorizeDecide {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServer {
-    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57")]
+    #[prost(oneof="client_to_server::Payload", tags="1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 26, 27, 28, 32, 34, 24, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58")]
     pub payload: ::core::option::Option<client_to_server::Payload>,
 }
 /// Nested message and enum types in `ClientToServer`.
@@ -4071,6 +4082,8 @@ pub mod client_to_server {
         SpeechRefineSet(super::SpeechRefineSet),
         #[prost(message, tag="57")]
         SpeechRefineCredentialsGet(super::SpeechRefineCredentialsGet),
+        #[prost(message, tag="58")]
+        SessionSeen(super::SessionSeen),
     }
 }
 // ===== Server → Client 载荷 =====
@@ -4652,6 +4665,14 @@ pub struct SpeechRefineCredentials {
     pub api_key: ::prost::alloc::string::String,
     #[prost(string, tag="5")]
     pub error: ::prost::alloc::string::String,
+}
+/// A client had this terminal's finished agent turn on screen. Fire-and-forget, no reply: the centre
+/// sets `seen` on the account's matching SessionAgentRef (only while its state is "done" or
+/// "waiting") and re-broadcasts that daemon's SessionAgentsUpdated; anything else is ignored.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionSeen {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
 }
 /// Bounded newest-first history. Zero before_sequence requests the first page.
 #[derive(Clone, PartialEq, ::prost::Message)]

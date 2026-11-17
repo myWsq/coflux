@@ -438,6 +438,17 @@ public struct Coflux_V1_SessionAgentRef: Sendable {
   /// 随条目消失一起清掉；旧 worker 不发 = 空串 = 该终端没有纸面可看。
   public var agentSessionID: String = String()
 
+  /// Set only by the centre on fan-out: true once any client of the account reported this finished
+  /// turn ("done"/"waiting") as looked at (SessionSeen). The mark lives in the centre's memory and is
+  /// cleared when the agent starts another turn or its session id changes. Daemons never set it and
+  /// the centre ignores it on input.
+  public var seen: Bool = false
+
+  /// Milliseconds since the epoch at which this entry's `state` was entered, on the daemon's clock.
+  /// Set by the daemon and copied unchanged by the centre. It identifies "the same turn" and is
+  /// compared only for equality, never against another clock. 0 = not reported (older daemon).
+  public var stateSince: Double = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1278,7 +1289,7 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0\u{3}agent_session_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0\u{3}agent_session_id\0\u{1}seen\0\u{3}state_since\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1293,6 +1304,8 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 5: try { try decoder.decodeSingularStringField(value: &self.message) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.progress) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.agentSessionID) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.seen) }()
+      case 9: try { try decoder.decodeSingularDoubleField(value: &self.stateSince) }()
       default: break
       }
     }
@@ -1320,6 +1333,12 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if !self.agentSessionID.isEmpty {
       try visitor.visitSingularStringField(value: self.agentSessionID, fieldNumber: 7)
     }
+    if self.seen != false {
+      try visitor.visitSingularBoolField(value: self.seen, fieldNumber: 8)
+    }
+    if self.stateSince.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.stateSince, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1331,6 +1350,8 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.message != rhs.message {return false}
     if lhs.progress != rhs.progress {return false}
     if lhs.agentSessionID != rhs.agentSessionID {return false}
+    if lhs.seen != rhs.seen {return false}
+    if lhs.stateSince != rhs.stateSince {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

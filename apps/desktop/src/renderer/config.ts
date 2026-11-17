@@ -17,6 +17,8 @@ export const SIDEBAR_WIDTH_KEY = "coflux_sidebar_width";
  * the width, a per-machine UI preference.
  */
 export const SIDEBAR_COLLAPSED_KEY = "coflux_sidebar_collapsed";
+/** 侧栏三区（当前/项目/设备）的高度权重 JSON：纯本机 UI 偏好，不按服务器分 key，同宽度。 */
+export const SIDEBAR_SECTIONS_KEY = "coflux_sidebar_sections";
 /** 本机 daemon 接入引导点过「暂不」（plan 113）：按服务器地址分 key，之后只从账号菜单再进 */
 export const DAEMON_ONBOARDING_DISMISSED_KEY = `coflux_daemon_onboarding_dismissed:${SERVER_URL}`;
 /**

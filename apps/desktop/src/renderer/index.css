@@ -365,6 +365,23 @@ dialog button[aria-label="Close"] svg,
   background-clip: padding-box;
 }
 
+/* 侧栏三区（当前/项目/设备）的滚动条不常显：thumb 只在 hover 到该区时出现。8px 的
+   scrollbar 槽位仍占着（经典滚动条占布局宽度），所以显隐不会引起内容横跳。只给侧栏
+   窗格用——三个窗格摞在 260px 宽的侧栏里，常显三根 thumb 太吵；终端等其它滚动区不动。 */
+.scrollbar-on-hover::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.scrollbar-on-hover:hover::-webkit-scrollbar-thumb {
+  background: #333333;
+  background-clip: padding-box;
+}
+
+.scrollbar-on-hover:hover::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+  background-clip: padding-box;
+}
+
 /* 文字周围的内边距归 .xterm，不归宿主容器：FitAddon 读的是宿主的 computed height/width
    （box-sizing: border-box 下拿到的是 border-box 尺寸），再只减去 terminal.element 自己的 padding。
    放在宿主上会被当成可用空间多算出一行/一列；放在这里 FitAddon 的减法才是对的，而且

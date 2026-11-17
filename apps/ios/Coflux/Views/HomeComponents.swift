@@ -3,7 +3,8 @@ import CofluxProtocol
 import SwiftUI
 
 // Building blocks shared by the compact home (WorkspaceListView) and the split sidebar
-// (HomeSidebar): avatars, the waiting-item wording and the workspace activity line.
+// (HomeSidebar): avatars and the workspace activity line. The sections themselves are in
+// HomeSections.swift.
 
 /// An agent's mark in a rounded square, with an optional state dot on its corner.
 struct AgentAvatar: View {
@@ -63,44 +64,6 @@ struct AgentAvatar: View {
     }
 }
 
-/// The wording of one waiting item, resolved against the live client state.
-struct WaitingItemText {
-    let mark: AgentAvatar.Mark
-    /// Agent name, or the secret's name
-    let title: String
-    /// project · branch
-    let context: String
-    /// 在问你 / 要权限 / 等输入
-    let pill: String
-    /// The agent's message, or a generic line when it left none
-    let message: String
-    let isSecret: Bool
-
-    @MainActor
-    init(_ item: WaitingItem, client: CofluxClient) {
-        let workspace = client.workspaces.first { $0.id == item.workspaceID }
-        let project = client.projects.first { $0.id == item.projectID }
-        let branch = workspace.map { $0.branch.isEmpty ? $0.name : $0.branch } ?? ""
-        context = [project?.name ?? client.deviceName(item.daemonID), branch]
-            .filter { !$0.isEmpty }
-            .joined(separator: " · ")
-        switch item.kind {
-        case .agent(let name, let state, let message):
-            mark = .agent(name)
-            title = name.isEmpty ? "agent" : name
-            pill = state == .question ? "等待回答" : "等待批准"
-            self.message = message.isEmpty ? (state == .question ? "有问题需要你回答" : "有操作需要你批准") : message
-            isSecret = false
-        case .secret(let request):
-            mark = .secret
-            title = request.name
-            pill = "等待输入"
-            message = request.reason.isEmpty ? "Agent 请求输入 \(request.name)" : request.reason
-            isSecret = true
-        }
-    }
-}
-
 /// The row line of a workspace: which agent sets its state, the state's tone and the subtitle.
 struct WorkspaceActivity {
     enum Tone {
@@ -110,11 +73,12 @@ struct WorkspaceActivity {
         case idle
         case failed
 
+        /// Blue while the agent works, green once its turn is finished (the desktop's check mark).
         var color: Color {
             switch self {
             case .waiting: Theme.warning
-            case .active: Theme.success
-            case .done: Theme.info
+            case .active: Theme.info
+            case .done: Theme.success
             case .idle: Theme.mutedForeground
             case .failed: Theme.destructive
             }
@@ -126,10 +90,17 @@ struct WorkspaceActivity {
     /// That agent's turn state (`SessionAgentRef.state`); a pending secret request counts as
     /// waiting for approval.
     let agentState: String?
+    /// The centre's account-wide seen mark on that agent's finished turn
+    /// (`SessionAgentRef.seen`, plan 20261111-agent-seen-sync).
+    let agentSeen: Bool
     let tone: Tone
     let subtitle: String
     /// The terminal the row opens: the one that waits, else the agent's, else nil (keep the last).
     let taskID: String?
+    /// How much the workspace asks of the user, for a collapsed project's summary: 5 approval or
+    /// a secret request, 4 question, 3 error, 2 active, 1 done, 0 nothing. 3 and above wait for
+    /// the user (待处理).
+    let rank: Int
 
     @MainActor
     init(_ workspace: Coflux_V1_Workspace, client: CofluxClient) {
@@ -140,10 +111,11 @@ struct WorkspaceActivity {
         for task in running {
             guard let ref = client.agent(forTask: task) else { continue }
             let rank = switch ref.state {
-            case "approval": 4
-            case "question": 3
+            case "approval": 5
+            case "question": 4
+            case "error": 3
             case "active": 2
-            case "done": 1
+            case "done", "waiting": 1
             default: 0
             }
             if best == nil || rank > best!.rank { best = (task, ref, rank) }
@@ -155,21 +127,28 @@ struct WorkspaceActivity {
         if let secret = client.pendingSecretRequest(workspaceID: workspace.id) {
             agent = best?.ref.agent
             agentState = "approval"
+            agentSeen = false
             tone = .waiting
             subtitle = "等待输入 \(secret.name)"
             taskID = secret.taskID
+            rank = 5
         } else if let best, best.rank >= 1 {
             agent = best.ref.agent
             agentState = best.ref.state
+            agentSeen = best.ref.seen
             taskID = best.task.id
+            rank = best.rank
             let message = best.ref.message.isEmpty ? nil : best.ref.message
             switch best.rank {
-            case 4:
+            case 5:
                 tone = .waiting
                 subtitle = joined("等待批准", message)
-            case 3:
+            case 4:
                 tone = .waiting
                 subtitle = joined("等待回答", message)
+            case 3:
+                tone = .failed
+                subtitle = joined("出错了", message)
             case 2:
                 tone = .active
                 subtitle = joined("正在执行", progress)
@@ -180,7 +159,9 @@ struct WorkspaceActivity {
         } else {
             agent = best?.ref.agent
             agentState = best?.ref.state
+            agentSeen = best?.ref.seen ?? false
             taskID = best?.task.id
+            rank = 0
             if tasks.isEmpty {
                 tone = .idle
                 subtitle = "暂无终端"
@@ -318,26 +299,13 @@ struct WorkspaceRowContent: View {
     }
 }
 
-/// The small section header of the sidebar and the home: "title · detail", muted, with an optional
-/// leading dot for a project's device (filled online, hollow offline).
+/// The small section header of the sidebar and the home: "title · detail", muted.
 struct HomeSectionHeader: View {
     let title: String
     var detail = ""
-    var deviceOnline: Bool?
 
     var body: some View {
         HStack(spacing: 4) {
-            if let online = deviceOnline {
-                Group {
-                    if online {
-                        Circle().fill(Theme.success)
-                    } else {
-                        Circle().strokeBorder(Theme.mutedForeground, lineWidth: 1.2)
-                    }
-                }
-                .frame(width: 6, height: 6)
-                .padding(.trailing, 2)
-            }
             Text(title)
                 .font(Theme.Fonts.label.weight(.semibold))
                 .foregroundStyle(Theme.mutedForeground)
@@ -361,7 +329,7 @@ struct WorkspaceRowIcon: View {
 
     /// Clawd's pose for the row's agent: confetti for a finished turn nobody has looked at yet.
     private var clawd: ClawdPose {
-        let seen = activity.taskID.map { navigation.seenFinishedTaskIDs.contains($0) } ?? false
+        let seen = navigation.isTurnSeen(taskID: activity.taskID, centreSeen: activity.agentSeen)
         return ClawdPose(state: activity.agentState ?? "", seen: seen)
     }
 
@@ -395,14 +363,6 @@ extension View {
     func cardBackground(radius: CGFloat = Theme.Metrics.cardRadius) -> some View {
         modifier(CardBackground(radius: radius))
     }
-}
-
-/// A short relative time for a millisecond epoch (刚刚 / 2 分钟前).
-func relativeTimeLabel(_ milliseconds: Double, now: Date = .now) -> String {
-    guard milliseconds > 0 else { return "" }
-    let date = Date(timeIntervalSince1970: milliseconds / 1000)
-    if now.timeIntervalSince(date) < 60 { return "刚刚" }
-    return date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
 }
 
 /// Offline / reconnecting strip shown above home and the sidebar.

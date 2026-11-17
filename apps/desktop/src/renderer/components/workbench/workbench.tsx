@@ -367,6 +367,10 @@ export function Workbench({ client }: { client: CofluxClient }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [selection, setSelection] = useState<WorkbenchSelection | null>(readStoredSelection);
+  // 侧栏「定位到选中」的触发器（plan 20261111-sidebar-follow-selection）：每次 selectWorkspace /
+  // selectDevice 都自增——不能只看 selection 变没变，跳回已选中的工作区（用户刚手动折叠了它的
+  // 项目）也要重新展开；初值 0 覆盖启动恢复的那次。
+  const [revealNonce, setRevealNonce] = useState(0);
   // 访问过的工作区保持挂载（display 隐藏而非卸载）：卸载会 dispose xterm，
   // 丢 scrollback / 活跃 Tab / 控制权，切回来要重新 attach。同 TerminalPane 的 Tab 保活模式上移一层。
   const [visitedWorkspaceIds, setVisitedWorkspaceIds] = useState<ReadonlySet<string>>(new Set());
@@ -588,12 +592,14 @@ export function Workbench({ client }: { client: CofluxClient }) {
     const next: WorkbenchSelection = { kind: "workspace", id: workspaceId };
     setSelection(next);
     persistSelection(next);
+    setRevealNonce((nonce) => nonce + 1);
   }
 
   function selectDevice(daemonId: string) {
     const next: WorkbenchSelection = { kind: "device", id: daemonId };
     setSelection(next);
     persistSelection(next);
+    setRevealNonce((nonce) => nonce + 1);
     setDeviceTerminalError(null);
   }
 
@@ -1631,6 +1637,27 @@ export function Workbench({ client }: { client: CofluxClient }) {
     for (const taskId of screen.visible) if (!previous.has(taskId)) attach.ensureVisible(taskId);
   });
 
+  // A finished agent turn on screen counts as seen, for the whole account (plan
+  // 20261111-agent-seen-sync): reported when a terminal comes on screen and when presence or the task
+  // list changes while it is there. markSessionSeen sends at most once per finished turn.
+  const markVisibleTurnsSeen = useEffectEvent(() => {
+    const visibleTasks = client.store.getState().tasks;
+    for (const taskId of screen.visible) {
+      const sessionId = visibleTasks.find((task) => task.id === taskId)?.sessionId;
+      if (sessionId) client.markSessionSeen(sessionId);
+    }
+  });
+  useEffect(() => {
+    markVisibleTurnsSeen();
+  });
+  useEffect(
+    () =>
+      client.store.subscribe((state, previous) => {
+        if (state.sessionAgents !== previous.sessionAgents || state.tasks !== previous.tasks) markVisibleTurnsSeen();
+      }),
+    [client],
+  );
+
   // Persisting (see flushLayoutPersist), scheduled after every commit that changed the layouts.
   const flushLayoutPersistLater = useEffectEvent(() => flushLayoutPersist());
   useEffect(() => {
@@ -1908,6 +1935,7 @@ export function Workbench({ client }: { client: CofluxClient }) {
       <Sidebar
         client={client}
         selectedWorkspaceId={selection?.kind === "workspace" ? selection.id : null}
+        revealNonce={revealNonce}
         onSelectWorkspace={selectWorkspace}
         onScreenTaskId={onScreenTaskId}
         onLandOnTask={landOnTask}

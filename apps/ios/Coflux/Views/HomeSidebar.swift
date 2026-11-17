@@ -3,12 +3,13 @@ import CofluxProtocol
 import SwiftUI
 
 /// Home compacted into the split layout's sidebar (plan D8, mockup W1/W2), laid out like the
-/// desktop's: "待处理" rows, the projects with their workspace rows, then every device. Its top bar
+/// desktop's: 「当前」 — the live agent terminals — then the projects, collapsed until opened, each
+/// with its workspace rows (`HomeSections`), then every device. Its top bar
 /// is the account — who is signed in on the left, settings on the right — in place of a title
 /// (no search, no separate account button — user's call, 2026-11-09). Tapping a row switches the detail column to that terminal — a
 /// device's row to the device's own terminal page — with no back navigation; the selected row is
 /// highlighted. Workspace rows end their state line with the diff. When the sidebar is wide (book pose, where it takes the leading half) the rows carry
-/// more: the time and the custom label. In the tall layout the same sidebar floats over the
+/// more: the agent's progress and the custom label. In the tall layout the same sidebar floats over the
 /// terminal (`AppShell`).
 struct HomeSidebar: View {
     let client: CofluxClient
@@ -21,38 +22,14 @@ struct HomeSidebar: View {
     @State private var showingSettings = false
 
     private static let wideWidth: CGFloat = 380
-    /// A row's padding inside its highlight; the highlight sits 6 pt in from the sidebar's edges.
-    private static let rowInsets = EdgeInsets(top: 9, leading: 16, bottom: 9, trailing: 14)
-    private static let headerInsets = EdgeInsets(top: 16, leading: 16, bottom: 4, trailing: 14)
 
     var body: some View {
-        let items = client.waitingItems
+        list.expandsShownWorkspace(client: client)
+    }
+
+    private var list: some View {
         List {
-            if !items.isEmpty {
-                Section {
-                    ForEach(items) { item in
-                        waitingRow(item)
-                    }
-                } header: {
-                    sectionHeader("待处理", detail: "\(items.count)")
-                }
-            }
-            ForEach(client.visibleProjects, id: \.id) { project in
-                let members = client.workspaces.filter { $0.projectID == project.id }
-                if !members.isEmpty {
-                    Section {
-                        ForEach(members, id: \.id) { workspace in
-                            workspaceRow(workspace)
-                        }
-                    } header: {
-                        sectionHeader(
-                            project.name,
-                            detail: client.deviceName(project.daemonID),
-                            deviceOnline: client.daemons.first { $0.daemonID == project.daemonID }?.online ?? false
-                        )
-                    }
-                }
-            }
+            HomeSections(client: client, surface: .list, wide: wide, onOpen: open)
             if !client.daemons.isEmpty {
                 Section {
                     ForEach(sortedDaemons, id: \.daemonID) { daemon in
@@ -65,7 +42,7 @@ struct HomeSidebar: View {
         }
         .listStyle(.plain)
         // Denser than the system's rows (user's call, 2026-11-10; 6 pt insets were too tight):
-        // rows as tall as their two lines plus `rowInsets`, not the 44 pt minimum.
+        // rows as tall as their two lines plus `HomeRowMetrics.rowInsets`, not the 44 pt minimum.
         .environment(\.defaultMinListRowHeight, 1)
         .listSectionSpacing(0)
         .contentMargins(.top, 2, for: .scrollContent)
@@ -109,71 +86,19 @@ struct HomeSidebar: View {
 
     // MARK: - Rows
 
-    private func sectionHeader(_ title: String, detail: String, deviceOnline: Bool? = nil) -> some View {
-        HomeSectionHeader(title: title, detail: detail, deviceOnline: deviceOnline)
-            .listRowInsets(Self.headerInsets)
+    private func sectionHeader(_ title: String, detail: String) -> some View {
+        HomeSectionHeader(title: title, detail: detail)
+            .listRowInsets(HomeRowMetrics.headerInsets)
     }
 
-    private func waitingRow(_ item: WaitingItem) -> some View {
-        let text = WaitingItemText(item, client: client)
-        let selected = navigation.tab == .home
-            && navigation.workspaceID == item.workspaceID
-            && navigation.selectedTaskID == item.taskID
-        // One line: the state plus the message when wide, the project otherwise.
-        let line = wide ? "\(text.pill)：\(text.message)" : "\(text.pill) · \(text.context)"
-        return Button {
-            if case .secret = item.kind {
-                if !item.workspaceID.isEmpty {
-                    navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
-                }
-                // The sheet hangs off this sidebar: floating, it stays out until the sheet is
-                // done, or the sheet would lose the view it is presented from.
-                if layout == .tall { navigation.overlayVisibility = .all }
-                secretSheet = SecretSheetTarget(taskID: item.taskID)
-            } else {
-                navigation.show(workspaceID: item.workspaceID, taskID: item.taskID)
-            }
-        } label: {
-            HStack(spacing: 10) {
-                AgentAvatar(mark: text.mark, size: 26, dot: Theme.warning, clawd: .raise)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(text.isSecret ? text.title : (workspaceTitle(item.workspaceID) ?? text.title))
-                        .font(Theme.Fonts.rowTitle)
-                        .foregroundStyle(Theme.foreground)
-                        .lineLimit(1)
-                    Text(line)
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.warning)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
-                if wide {
-                    Text(relativeTimeLabel(item.time))
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.subtleForeground)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .listRowBackground(rowBackground(selected))
-        .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
-    }
-
-    private func workspaceRow(_ workspace: Coflux_V1_Workspace) -> some View {
-        let activity = WorkspaceActivity(workspace, client: client)
-        let selected = navigation.tab == .home && navigation.workspaceID == workspace.id
-        return Button {
-            navigation.show(workspaceID: workspace.id, taskID: activity.taskID)
-        } label: {
-            WorkspaceRowContent(workspace: workspace, activity: activity, showsLabel: wide)
-        }
-        .buttonStyle(.plain)
-        .workspaceContextMenu(client: client, workspace: workspace)
-        .listRowBackground(rowBackground(selected))
-        .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
+    /// A 「当前」 row: its terminal, and the input sheet when a secret request waits in it.
+    private func open(_ row: CurrentTerminalRow) {
+        navigation.show(workspaceID: row.workspace.id, taskID: row.task.id)
+        guard row.secret != nil else { return }
+        // The sheet hangs off this sidebar: floating, it stays out until the sheet is done, or
+        // the sheet would lose the view it is presented from.
+        if layout == .tall { navigation.overlayVisibility = .all }
+        secretSheet = SecretSheetTarget(taskID: row.task.id)
     }
 
     /// Online devices first, then by name.
@@ -197,7 +122,7 @@ struct HomeSidebar: View {
         .copyHandleContextMenu(.device, id: daemon.daemonID)
         .listRowBackground(rowBackground(navigation.selectedDeviceID == daemon.daemonID))
         .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
+        .listRowInsets(HomeRowMetrics.rowInsets)
     }
 
     /// Who is signed in (`AuthOk.login_name`) and the connection to the centre, in the sidebar's
@@ -244,9 +169,5 @@ struct HomeSidebar: View {
         RoundedRectangle(cornerRadius: 12)
             .fill(selected ? Theme.accentSurface : Color.clear)
             .padding(.horizontal, 6)
-    }
-
-    private func workspaceTitle(_ workspaceID: String) -> String? {
-        client.workspaces.first { $0.id == workspaceID }?.displayTitle
     }
 }
