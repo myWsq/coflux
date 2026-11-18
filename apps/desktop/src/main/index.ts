@@ -28,6 +28,7 @@ import { createBrowserLogin } from "./browser-login";
 import { createRendererResetListener } from "./renderer-reset";
 import { readSettingsFile, resolveServerUrl } from "./settings";
 import { createTokenStore } from "./token-store";
+import { devLogin, devLoginPlan } from "./dev-login";
 import { createUpdater } from "./updater";
 import { createMainWindow, openExternalIfHttp } from "./window";
 import { createBrowserHost } from "./browser-host";
@@ -104,6 +105,8 @@ function sendCommand(command: DesktopCommand): void {
 // window-state.json 是窗口 bounds（plan 106）。后两份由 app 自己维护，不与 settings.json 混放。
 const settingsPath = () => join(app.getPath("userData"), "settings.json");
 const tokenPath = () => join(app.getPath("userData"), "session-token.bin");
+/** The session of a dev build signed in to a local server by itself (dev-login.ts): never the profile's real one. */
+const localTokenPath = () => join(app.getPath("userData"), "session-token.local.bin");
 const windowStatePath = () => join(app.getPath("userData"), "window-state.json");
 // executor（plan 20260918）：配置的真相源是账号，不再有本机的 executor.json / executor-key.bin。
 // 读的是本机 daemon 写下的缓存文件（$COFLUX_HOME 下，见 @coflux/executor 的 settings-cache.ts）；pi 自己的
@@ -186,7 +189,7 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== "darwin") app.quit();
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     log.info("启动", { version: app.getVersion(), packaged: app.isPackaged, electron: process.versions.electron, userData: app.getPath("userData") });
     if (instanceLabel) setDockBadgeLabel(instanceLabel);
     registerAppProtocol(RENDERER_ROOT);
@@ -223,12 +226,22 @@ if (!app.requestSingleInstanceLock()) {
     log.info("服务器地址", serverUrl);
 
     // 会话 token（plan 106）：safeStorage 加密落 userData/session-token.bin；失败态归一为未登录（见 token-store.ts）。
+    // A dev build pointed at a local server signs in by itself and keeps that session in a token
+    // file of its own (see dev-login.ts); everything else uses the profile's one session token.
+    const devLoginTarget = devLoginPlan({ packaged: app.isPackaged, serverUrl, env: process.env });
     const tokenStore = createTokenStore({
-      filePath: tokenPath(),
+      filePath: devLoginTarget ? localTokenPath() : tokenPath(),
       codec: safeStorage,
       onError: (stage, error) => log.warn(`会话 token ${stage} 失败，按未登录处理`, error),
     });
     if (!safeStorage.isEncryptionAvailable()) log.warn("safeStorage 加密不可用：会话 token 不落盘，每次启动需重新登录");
+    if (devLoginTarget) {
+      const token = await devLogin(devLoginTarget, (url, init) => fetch(url, init), (reason) => log.warn(`dev sign-in to the local server failed: ${reason}`));
+      if (token) {
+        tokenStore.write(token);
+        log.info(`dev sign-in to the local server as ${devLoginTarget.username}`);
+      }
+    }
 
     // Dictation (plan 20261110-desktop-dictation): the speech keys are fetched over a short control
     // connection of this process and never leave it; the renderer gets text and outcomes only.

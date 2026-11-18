@@ -27,6 +27,8 @@ pnpm dev:pg && pnpm dev:server && pnpm dev:daemon   # separate terminals
 pnpm dev:desktop                                    # defaults to ws://localhost:8787/client
 ```
 
+The dev client signs in to a local server by itself (the server's `COFLUX_USERNAME` / `COFLUX_PASSWORD`, default `admin` / `admin`); see the skill. Start the server before the client, or the window opens at the sign-in screen.
+
 An authorization link printed by the daemon expires after ten minutes; the daemon requests a new one on its own, so read the last line of its log rather than reusing an old link.
 
 ## What this setup does not cover
