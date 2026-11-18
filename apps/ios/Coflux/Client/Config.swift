@@ -9,6 +9,6 @@ enum Config {
             return url
         }
         #endif
-        return URL(string: "wss://api.coflux.yourantiandi.com/client")!
+        return URL(string: "wss://api.coflux.cn/client")!
     }
 }

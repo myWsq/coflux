@@ -644,12 +644,13 @@ fn main() {
         .block_on(runtime_main(home, sessions));
 }
 
-/// The public centre moved to its ICP-registered name on 2026-10-09. Devices enrolled before then saved
-/// the old address, which still works through a slow forwarder; dial the current one instead. Nothing
+/// The public centre's address moved twice: api.coflux.dev until 2026-10-09, then the interim
+/// ICP-registered api.coflux.yourantiandi.com until coflux.cn (2026-11-19). Devices enrolled earlier saved
+/// one of the old addresses, which still reach the same centre; dial the current one instead. Nothing
 /// else about the device changes: its credentials are not bound to the address.
 fn current_server_url(url: String) -> String {
-    if url == "wss://api.coflux.dev/daemon" {
-        "wss://api.coflux.yourantiandi.com/daemon".to_string()
+    if url == "wss://api.coflux.dev/daemon" || url == "wss://api.coflux.yourantiandi.com/daemon" {
+        "wss://api.coflux.cn/daemon".to_string()
     } else {
         url
     }

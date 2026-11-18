@@ -84,6 +84,16 @@ Daemons run on users' machines, not as part of these server roles. prod-bj also 
 
 ## Current topology: the centre on coflux-bj (since 2026-10-09 23:10)
 
+### Public name: `api.coflux.cn` (from 2026-11-19)
+
+`coflux.cn` is ICP-registered and its DNS is on Cloudflare (account `Wsq961@outlook.com's Account`; the `cf` CLI on the owner's Mac can edit it with `CLOUDFLARE_ACCOUNT_ID=13033a38155f3062a88bc6678854ac2d`). `api.coflux.cn` is an A record to 82.157.104.55, **DNS only**: proxying it would send mainland traffic abroad and back (TTFB ~1.8s instead of ~0.05s) on a long-lived WebSocket.
+
+- **Caddy** on coflux-bj serves `api.coflux.cn` with the same routes as `api.coflux.yourantiandi.com` (backup `Caddyfile.bak-pre-coflux-cn-*`); its certificate is Let's Encrypt via TLS-ALPN, no API token involved.
+- **Centre** (at the cutover, before the 2.30.0 tag): `COFLUX_PUBLIC_URL` and `COFLUX_DAEMON_URL` on `api.coflux.cn`, `COFLUX_PUBLIC_URL_ALIASES=https://api.coflux.yourantiandi.com,https://api.coflux.dev`. GitHub/Google sign-in is not configured on this centre; if it is ever enabled, note that it returns to the primary name, so the provider callbacks must name `api.coflux.cn`.
+- **Clients** from 2.30.0 default to `api.coflux.cn` and read a saved `api.coflux.dev` or `api.coflux.yourantiandi.com` default as the new one; credentials are not bound to the address. iOS has no saved address and simply ships the new default.
+- **DERP**: `derp.coflux.cn` is a second Caddy site (DNS only, own certificate) in front of the same derper as `derp.coflux.yourantiandi.com`; the loopback hop keeps derper's own name, so derper and its certificate links are unchanged. At the cutover, `tailcat.env`'s region 903 node `HostName` becomes `derp.coflux.cn` (same RegionID, IPv4 and STUN port). The centre hands the region to each daemon when it identifies, so the restart moves every device; no client release is involved. Both Caddy sites stay until no session dials the old name.
+- Retire the old names after the access log shows no more traffic on them.
+
 The centre, its database and the DERP/STUN node run on one Tencent Cloud host in Beijing, **coflux-bj** (`root@82.157.104.55`, zone `ap-beijing-3`, same account and the same layout as coflux-sh below). It replaced coflux-sh after about two hours because Shanghai was too far from the owner's devices. Differences from the coflux-sh description that follows:
 
 - **Deployed**: `63704e9c` (= v2.18.0, deployed 2026-10-10 20:52 before the tag was pushed). No migration; backup `/var/backups/coflux/coflux-predeploy-63704e9c-20261010-204628.dump`. From this version the centre broadcasts session metadata instead of checkpoint content to clients that declare `ClientAuth.session_metadata`, and keeps the content push for older desktops and iOS.
