@@ -587,6 +587,16 @@ async fn handle_agent(
                 run_id: parsed.run_id,
             }
         }
+        "canvas.show" => {
+            if parsed.path.trim().is_empty() {
+                return Err(RequestError::BadRequest("canvas.show needs the path of an HTML file".into()));
+            }
+            AgentAction::CanvasShow {
+                path: parsed.path,
+                title: parsed.title,
+            }
+        }
+        "canvas.list" => AgentAction::CanvasList,
         "annotations.list" => AgentAction::AnnotationsList,
         "annotations.watch" => AgentAction::AnnotationsWatch {
             timeout_ms: parsed.timeout_ms,

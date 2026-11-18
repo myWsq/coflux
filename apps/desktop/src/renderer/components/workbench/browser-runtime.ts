@@ -7,6 +7,7 @@ import { readLibrary, writeLibrary, type BrowserLibrary, type BrowserLibraryStor
 import {
   serializeBrowserTabRecords,
   writeBrowserTabRecords,
+  type BrowserTabCanvas,
   type BrowserTabRecord,
   type BrowserTabStore,
 } from "@/components/workbench/browser-tabs";
@@ -33,6 +34,8 @@ export type BrowserTabView = {
   title: string;
   favicon: string | null;
   loading: boolean;
+  /** Set on a canvas tab (plan 20261112-agent-canvas); see `BrowserTabRecord.canvas`. */
+  canvas?: BrowserTabCanvas;
 };
 
 /** Per-tab hooks a mounted view registers. */
@@ -42,12 +45,14 @@ export type BrowserTabHandlers = {
   /** Keyboard focus into the tab: the page, or the address bar when there is no page to focus. */
   focus: () => void;
   reload: () => void;
+  /** Load a URL in this tab's page, as the address bar would. */
+  navigate: (url: string) => void;
 };
 
 export type BrowserRuntime = {
   tabs: StoreApi<{ tabs: Readonly<Record<string, BrowserTabView>> }>;
   library: StoreApi<{ library: BrowserLibrary }>;
-  createTab: (id: string, workspaceId: string, url: string) => void;
+  createTab: (id: string, workspaceId: string, url: string, canvas?: BrowserTabCanvas) => void;
   updateTab: (id: string, patch: Partial<Omit<BrowserTabView, "workspaceId">>) => void;
   removeTab: (id: string) => void;
   updateLibrary: (change: (library: BrowserLibrary) => BrowserLibrary) => void;
@@ -63,6 +68,11 @@ export type BrowserRuntime = {
   /** Focuses a tab now, or as soon as its view registers (a tab that was just created). */
   focus: (tabId: string) => void;
   reload: (tabId: string) => void;
+  /**
+   * Loads `url` in the tab (plan 20261112-agent-canvas: a canvas shown again goes back to its own
+   * address, fresh). A tab whose view is not mounted just takes the URL and loads it when it mounts.
+   */
+  navigate: (tabId: string, url: string) => void;
   /** Workbench-level reactions: a page took focus, a page opened a popup. */
   setWorkbenchHandlers: (handlers: { onGuestFocus: (tabId: string) => void; onPopup: (tabId: string, url: string) => void }) => void;
   onDownload: (listener: (event: Extract<DesktopBrowserEvent, { kind: "download" }>) => void) => () => void;
@@ -81,7 +91,7 @@ export function createBrowserRuntime(options: {
   const { desktop } = options;
   const initialTabs: Record<string, BrowserTabView> = {};
   for (const [id, record] of Object.entries(options.initialRecords)) {
-    initialTabs[id] = { workspaceId: record.workspaceId, url: record.url, title: record.title, favicon: null, loading: false };
+    initialTabs[id] = { workspaceId: record.workspaceId, url: record.url, title: record.title, favicon: null, loading: false, canvas: record.canvas };
   }
   const tabs = createStore<{ tabs: Readonly<Record<string, BrowserTabView>> }>(() => ({ tabs: initialTabs }));
   const library = createStore<{ library: BrowserLibrary }>(() => ({ library: readLibrary(options.libraryStore) }));
@@ -91,7 +101,7 @@ export function createBrowserRuntime(options: {
   let lastRecords: string | null = serializeRecords(initialTabs);
   function serializeRecords(views: Readonly<Record<string, BrowserTabView>>): string {
     const records: Record<string, BrowserTabRecord> = {};
-    for (const [id, view] of Object.entries(views)) records[id] = { workspaceId: view.workspaceId, url: view.url, title: view.title };
+    for (const [id, view] of Object.entries(views)) records[id] = { workspaceId: view.workspaceId, url: view.url, title: view.title, canvas: view.canvas };
     return serializeBrowserTabRecords(records);
   }
   tabs.subscribe((state) => {
@@ -152,8 +162,8 @@ export function createBrowserRuntime(options: {
   return {
     tabs,
     library,
-    createTab(id, workspaceId, url) {
-      tabs.setState((state) => ({ tabs: { ...state.tabs, [id]: { workspaceId, url, title: "", favicon: null, loading: false } } }));
+    createTab(id, workspaceId, url, canvas) {
+      tabs.setState((state) => ({ tabs: { ...state.tabs, [id]: { workspaceId, url, title: "", favicon: null, loading: false, canvas } } }));
     },
     updateTab(id, patch) {
       const current = tabs.getState().tabs[id];
@@ -228,6 +238,11 @@ export function createBrowserRuntime(options: {
     },
     reload(tabId) {
       handlers.get(tabId)?.reload();
+    },
+    navigate(tabId, url) {
+      const handler = handlers.get(tabId);
+      if (handler) handler.navigate(url);
+      else this.updateTab(tabId, { url });
     },
     setWorkbenchHandlers(next) {
       workbench = next;

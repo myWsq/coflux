@@ -885,6 +885,8 @@ export async function startStack(opts = {}) {
       COFLUX_DEVICE_NAME: opts.deviceName ?? "test-dev",
       // 黑盒栈绝不能占用真实 daemon 的生产端口；worker 会把实际随机端口上报给 control plane。
       COFLUX_LOCAL_GATEWAY_PORT: "0",
+      // Same for the canvas listener: parallel stacks and the real daemon must not share its port.
+      COFLUX_CANVAS_PORT: "0",
       ...(opts.daemonEnv ?? {}),
     };
     ref.serverEnv = serverEnv;

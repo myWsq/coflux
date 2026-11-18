@@ -37,7 +37,15 @@ struct ObservedInner {
     hook_agent_sessions: HashMap<String, String>,
     /// The root OSC 7501 record per session, as sessiond pushed it: the only source of an
     /// entry's state and message, and the preferred source of its agent name.
-    program_status: HashMap<String, ProgramStatus>,
+    program_status: HashMap<String, ProgramRecord>,
+}
+
+/// A session's OSC 7501 record with the wall-clock millisecond at which its presence state was
+/// entered. The moment identifies the turn: a new record in the same presence state keeps it, a
+/// different presence state takes a new one, and forgetting the record forgets it.
+struct ProgramRecord {
+    status: ProgramStatus,
+    state_since: f64,
 }
 
 /// 一份待发送观测值，同时持有对应类型的 scan lane。调用方必须在 enqueue 完成并按结果
@@ -116,10 +124,32 @@ impl ObservedState {
 
     /// Record (or, with `None`, forget) a session's root OSC 7501 record.
     pub(crate) fn apply_program_status(&self, session_id: String, status: Option<ProgramStatus>) {
+        self.apply_program_status_at(session_id, status, crate::now_ms_f64());
+    }
+
+    /// `apply_program_status` with the clock supplied: `now` stamps the record when its
+    /// presence state differs from the stored one's (or there is none); otherwise the stored
+    /// moment is kept.
+    fn apply_program_status_at(&self, session_id: String, status: Option<ProgramStatus>, now: f64) {
         let mut inner = self.inner.lock().unwrap();
         match status {
             Some(status) => {
-                inner.program_status.insert(session_id, status);
+                let state_since = match inner.program_status.get(&session_id) {
+                    Some(stored)
+                        if program_presence_state(&stored.status)
+                            == program_presence_state(&status) =>
+                    {
+                        stored.state_since
+                    }
+                    _ => now,
+                };
+                inner.program_status.insert(
+                    session_id,
+                    ProgramRecord {
+                        status,
+                        state_since,
+                    },
+                );
             }
             None => {
                 inner.program_status.remove(&session_id);
@@ -333,6 +363,7 @@ fn merge_annotations(
                 progress: String::new(),
                 agent_session_id: String::new(),
                 seen: false,
+                state_since: 0.0,
             })
             .collect();
         sessions.extend(reported);
@@ -352,8 +383,13 @@ fn merge_annotations(
     }
 
     for entry in &mut sessions {
-        if let Some(record) = inner.program_status.get(&entry.session_id) {
+        if let Some(ProgramRecord {
+            status: record,
+            state_since,
+        }) = inner.program_status.get(&entry.session_id)
+        {
             entry.state = program_presence_state(record).to_string();
+            entry.state_since = *state_since;
             entry.message = match record.state {
                 ProgramState::Blocked | ProgramState::Error => record.message.clone(),
                 _ => String::new(),
@@ -432,6 +468,7 @@ mod tests {
             progress: String::new(),
             agent_session_id: String::new(),
             seen: false,
+            state_since: 0.0,
         }]
     }
 
@@ -837,6 +874,92 @@ mod tests {
             Some(record(ProgramState::Working, None, &wide, "")),
         );
         assert_eq!(committed(&observed, Vec::new()).agent, "x".repeat(31));
+    }
+
+    /// Entering another presence state takes the current moment; a detected entry without a
+    /// record reports none.
+    #[test]
+    fn program_status_record_stamps_the_moment_its_state_was_entered() {
+        let observed = ObservedState::new();
+        assert_eq!(committed(&observed, agents("s1")).state_since, 0.0);
+
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "pi", "")),
+            1_000.0,
+        );
+        let entry = committed(&observed, Vec::new());
+        assert_eq!(
+            (entry.state.as_str(), entry.state_since),
+            ("active", 1_000.0)
+        );
+
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            2_000.0,
+        );
+        let entry = committed(&observed, Vec::new());
+        assert_eq!((entry.state.as_str(), entry.state_since), ("done", 2_000.0));
+    }
+
+    /// The same presence state again, or with only its message changed, is the same turn.
+    #[test]
+    fn program_status_record_keeps_the_moment_while_its_state_holds() {
+        let observed = ObservedState::new();
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            2_000.0,
+        );
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            3_000.0,
+        );
+        assert_eq!(committed(&observed, Vec::new()).state_since, 2_000.0);
+
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "summary")),
+            4_000.0,
+        );
+        let entry = committed(&observed, Vec::new());
+        assert_eq!((entry.state.as_str(), entry.state_since), ("done", 2_000.0));
+    }
+
+    /// `done → working → done` is two turns: the second `done` has its own moment. Forgetting the
+    /// record forgets its moment too.
+    #[test]
+    fn program_status_record_restamps_a_returning_state() {
+        let observed = ObservedState::new();
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            2_000.0,
+        );
+        let first = committed(&observed, Vec::new()).state_since;
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Working, None, "pi", "")),
+            3_000.0,
+        );
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            4_000.0,
+        );
+        let second = committed(&observed, Vec::new()).state_since;
+        assert_eq!((first, second), (2_000.0, 4_000.0));
+
+        observed.apply_program_status_at("s1".into(), None, 5_000.0);
+        assert_eq!(committed(&observed, agents("s1")).state_since, 0.0);
+        observed.apply_program_status_at(
+            "s1".into(),
+            Some(record(ProgramState::Done, None, "pi", "")),
+            6_000.0,
+        );
+        assert_eq!(committed(&observed, Vec::new()).state_since, 6_000.0);
     }
 
     #[test]

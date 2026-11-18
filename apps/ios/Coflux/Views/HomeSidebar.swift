@@ -24,9 +24,7 @@ struct HomeSidebar: View {
     private static let wideWidth: CGFloat = 380
 
     var body: some View {
-        ScrollViewReader { proxy in
-            list.revealsShownWorkspace(client: client, proxy: proxy)
-        }
+        list.expandsShownWorkspace(client: client)
     }
 
     private var list: some View {

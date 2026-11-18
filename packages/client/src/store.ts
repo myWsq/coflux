@@ -121,6 +121,19 @@ function secretAnswerResult(status: SecretAnswerStatus): SecretAnswerResult {
 
 /** One workspace's browser annotation summary (plan 20260929-browser-annotations): the revision
  * and counts the center relays. Content is never here; it is fetched over the Device channel. */
+/** One workspace's canvas summary (plan 20261112-agent-canvas): the revision the center relays.
+ * The list itself is fetched over the Device channel. */
+export type CanvasSummaryState = { daemonId: string; revision: number };
+
+/** One canvas as a desktop needs it; `url` is where the workspace's device serves it (loopback on
+ * that device — a browser tab of the workspace reaches it through its partition). */
+export type CanvasEntry = { id: string; title: string; fileName: string; updatedAt: number; url: string };
+/** `unsupported` = the device runs an older coflux; `unavailable` = its canvas listener is not
+ * running (the port is taken); `unreachable` / `refused` as for annotations. */
+export type CanvasListResult =
+  | { ok: true; revision: number; canvases: CanvasEntry[] }
+  | { ok: false; reason: "unsupported" | "unavailable" | "unreachable" | "refused"; error: string };
+
 export type AnnotationSummaryState = {
   daemonId: string;
   revision: number;
@@ -233,6 +246,7 @@ import { createConnection, type AuthCredential, type ClientKind, type Connection
 import {
   ANNOTATION_FRAME_TOO_LARGE,
   ANNOTATIONS_UNSUPPORTED,
+  CANVAS_UNSUPPORTED,
   createDeviceRouter,
   type DeviceInputState,
   type DeviceRouter,
@@ -614,6 +628,9 @@ export type CofluxState = {
   /** Browser annotation summaries (plan 20260929-browser-annotations): workspaceId → revision and
    * counts, replaced per device by annotationsSummaryUpdated. Live-only, like secretRequests. */
   annotationSummaries: Record<string, AnnotationSummaryState>;
+  /** Canvas summaries by workspace id (plan 20261112-agent-canvas), replaced per device by
+   * canvasSummaryUpdated. Live-only, like annotationSummaries. */
+  canvasSummaries: Record<string, CanvasSummaryState>;
   /** The account's agent launch settings (plan 20261002-account-agent-settings), replaced whole by
    * every `agentSettingsUpdated`. Kept across disconnects and saved with the offline catalog, so the
    * last configuration this client received stays usable offline; reset only when the account
@@ -908,6 +925,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     secretRequests: {},
     executorRuns: {},
     annotationSummaries: {},
+    canvasSummaries: {},
     agentSettings: EMPTY_AGENT_SETTINGS,
     agentSettingsSupported: false,
     agentSettingsReceived: false,
@@ -1731,6 +1749,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
             secretRequests: {},
             executorRuns: {},
             annotationSummaries: {},
+            canvasSummaries: {},
             snapshotRevision: state.snapshotRevision + 1,
           };
         });
@@ -1759,6 +1778,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
           secretRequests: Object.fromEntries(Object.entries(state.secretRequests).filter(([, entry]) => entry.daemonId !== value.daemonId)),
           executorRuns: Object.fromEntries(Object.entries(state.executorRuns).filter(([, entry]) => entry.daemonId !== value.daemonId)),
           annotationSummaries: Object.fromEntries(Object.entries(state.annotationSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId)),
+          canvasSummaries: Object.fromEntries(Object.entries(state.canvasSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId)),
         }));
         break;
       }
@@ -1967,6 +1987,20 @@ export function createCofluxClient(options: CofluxClientOptions) {
             };
           }
           return { annotationSummaries };
+        });
+        break;
+      }
+      case "canvasSummaryUpdated": {
+        const value = payload.value;
+        store.setState((state) => {
+          // Full replacement per device (empty = no canvases on it).
+          const canvasSummaries: Record<string, CanvasSummaryState> = Object.fromEntries(
+            Object.entries(state.canvasSummaries).filter(([, entry]) => entry.daemonId !== value.daemonId),
+          );
+          for (const entry of value.workspaces) {
+            canvasSummaries[entry.workspaceId] = { daemonId: value.daemonId, revision: entry.revision };
+          }
+          return { canvasSummaries };
         });
         break;
       }
@@ -2276,6 +2310,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
       secretRequests: {},
       executorRuns: {},
       annotationSummaries: {},
+      canvasSummaries: {},
       agentSettings: EMPTY_AGENT_SETTINGS,
       agentSettingsSupported: false,
       agentSettingsReceived: false,
@@ -2546,6 +2581,31 @@ export function createCofluxClient(options: CofluxClientOptions) {
     }
   }
 
+  /** The workspace's canvases (plan 20261112-agent-canvas), most recently shown first. */
+  async function listCanvases(workspaceId: string): Promise<CanvasListResult> {
+    const daemonId = annotationDaemon(workspaceId);
+    if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
+    try {
+      const result = await deviceRouter.listCanvases(daemonId, workspaceId);
+      if (!result.ok) return { ok: false, reason: "refused", error: result.error };
+      if (result.port === 0) {
+        return { ok: false, reason: "unavailable", error: "该设备的画布服务没有启动（端口被占用），重启设备上的 coflux 后再试" };
+      }
+      const canvases = result.canvases.map((canvas) => ({
+        id: canvas.id,
+        title: canvas.title || canvas.fileName,
+        fileName: canvas.fileName,
+        updatedAt: Number(canvas.updatedAtMs),
+        url: `http://localhost:${result.port}/${canvas.id}/${encodeURIComponent(canvas.fileName)}`,
+      }));
+      return { ok: true, revision: result.revision, canvases };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: unknown } | null)?.code;
+      return { ok: false, reason: code === CANVAS_UNSUPPORTED ? "unsupported" : "unreachable", error: message };
+    }
+  }
+
   async function changeAnnotations(workspaceId: string, change: AnnotationChange): Promise<AnnotationMutateResult> {
     const daemonId = annotationDaemon(workspaceId);
     if (!daemonId) return { ok: false, reason: "refused", error: "工作区不存在" };
@@ -2711,6 +2771,7 @@ export function createCofluxClient(options: CofluxClientOptions) {
     },
     answerSecretRequest,
     listAnnotations,
+    listCanvases,
     changeAnnotations,
     readAnnotationImage,
     handOffAnnotations,

@@ -59,6 +59,7 @@ import {
   type SecretRequestRef,
   type ExecutorRunRef,
   type WorkspaceAnnotationSummary,
+  type WorkspaceCanvasSummary,
   type SessionCheckpoint,
   type SessionMetadata,
   type TerminalCommandState,
@@ -277,6 +278,10 @@ interface SessionAgentData {
    * SessionSeen, held only in memory, carried over across daemon reports while the turn stays
    * finished and the agent session id is unchanged. The daemon's own value is ignored. */
   seen: boolean;
+  /** The moment the entry's state was entered, in milliseconds on the daemon's clock (plan
+   * 20261115-agent-turn-identity): copied from the daemon's report, compared only for equality,
+   * never the centre's clock. 0 = not reported (older daemon) or not a finite number ≥ 0. */
+  stateSince: number;
 }
 
 /** A pending secret request (plan 20260926-agent-secret-input): metadata only, never the value.
@@ -312,6 +317,12 @@ interface AnnotationSummaryData {
   revision: number;
   pending: number;
   resolved: number;
+}
+
+/** One workspace's canvas summary (plan 20261112-agent-canvas): a revision, nothing else. */
+interface CanvasSummaryData {
+  workspaceId: WorkspaceId;
+  revision: number;
 }
 
 interface DaemonResyncAuthority {
@@ -673,6 +684,11 @@ export class Hub {
   /** Per daemon, the sequence of the latest AnnotationsSummary received: validation awaits the
    * store, and only the latest snapshot may land. */
   private annotationSummarySeq = new Map<DaemonId, number>();
+  /** Canvas summaries (plan 20261112-agent-canvas): the daemon's latest CanvasSummary, each
+   * workspace checked against the store. Memory only, revision only; the list itself travels end
+   * to end between desktops and the worker. Same lifecycle as the annotation summaries. */
+  private canvasSummaries = new Map<DaemonId, { accountId: AccountId; workspaces: CanvasSummaryData[] }>();
+  private canvasSummarySeq = new Map<DaemonId, number>();
   private readonly localControl: LocalControlPlane<ClientConn, DaemonConn>;
   /** 待确认的设备授权请求，键为一次性 token（cf_authz_*） */
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
@@ -2153,8 +2169,10 @@ export class Hub {
       const progress = Buffer.byteLength(entry.progress) > MAX_AGENT_MESSAGE_BYTES ? "" : entry.progress;
       // 形状不对就当没有（第二道防线；第一道是「id 永远作为独立 argv 传递」，见 plan 20260919）。
       const agentSessionId = validAgentSessionId(entry.agentSessionId) ? entry.agentSessionId : "";
+      const stateSince = Number.isFinite(entry.stateSince) && entry.stateSince >= 0 ? entry.stateSince : 0;
       // Seen is decided against the terminal's stored mark, so it holds across a daemon reconnect
-      // and a centre restart: the same terminal session, the same agent session, a finished turn.
+      // and a centre restart: the same terminal session, the same agent session, a finished turn
+      // entered at the same moment (so a later turn in the same state is not the one looked at).
       // Any other report for a marked terminal — a new turn, another session — clears the mark.
       // Whatever the daemon sent in `seen` is ignored.
       const mark = this.seenMarks.get(entry.taskId);
@@ -2162,9 +2180,20 @@ export class Hub {
         mark !== undefined &&
         mark.sessionId === entry.sessionId &&
         mark.agentSessionId === agentSessionId &&
+        mark.stateSince === stateSince &&
         FINISHED_AGENT_STATES.has(entry.state);
       if (mark !== undefined && !seen) this.clearSeenMark(mark.taskId);
-      valid.push({ sessionId: entry.sessionId, taskId: entry.taskId, agent: entry.agent, state: entry.state, message, progress, agentSessionId, seen });
+      valid.push({
+        sessionId: entry.sessionId,
+        taskId: entry.taskId,
+        agent: entry.agent,
+        state: entry.state,
+        message,
+        progress,
+        agentSessionId,
+        seen,
+        stateSince,
+      });
     }
     const unchanged =
       previous !== undefined &&
@@ -2180,7 +2209,9 @@ export class Hub {
           // 漏掉这条，Claude `/clear`（state 不变、只换 session）就永远不会重播。
           p.agentSessionId === valid[i]!.agentSessionId &&
           // A carry-over that clears the mark must broadcast too.
-          p.seen === valid[i]!.seen,
+          p.seen === valid[i]!.seen &&
+          // A new turn in the same state is a change too.
+          p.stateSince === valid[i]!.stateSince,
       );
     if (unchanged) return;
     if (valid.length === 0 && previous === undefined) return;
@@ -2199,7 +2230,12 @@ export class Hub {
       if (index < 0) continue;
       const session = entry.sessions[index]!;
       if (session.seen || !FINISHED_AGENT_STATES.has(session.state)) return;
-      this.recordSeenMark(accountId, { taskId: session.taskId as TaskId, sessionId, agentSessionId: session.agentSessionId });
+      this.recordSeenMark(accountId, {
+        taskId: session.taskId as TaskId,
+        sessionId,
+        agentSessionId: session.agentSessionId,
+        stateSince: session.stateSince,
+      });
       const sessions = entry.sessions.map((s, i) => (i === index ? { ...s, seen: true } : s));
       this.sessionAgents.set(daemonId, { accountId, sessions });
       this.broadcast(accountId, { case: "sessionAgentsUpdated", value: { daemonId, sessions } });
@@ -2378,6 +2414,42 @@ export class Hub {
     if (valid.length === 0) this.annotationSummaries.delete(daemonId);
     else this.annotationSummaries.set(daemonId, { accountId: daemon.accountId, workspaces: valid });
     this.broadcast(daemon.accountId, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: valid } });
+  }
+
+  /** Canvas summaries (plan 20261112-agent-canvas): validated and sequenced exactly like the
+   * annotation summaries above — foreign or malformed entries are dropped, only the latest
+   * snapshot of the current connection lands, and an unchanged one is absorbed. */
+  private async acceptCanvasSummary(daemon: DaemonConn, entries: readonly WorkspaceCanvasSummary[]): Promise<void> {
+    const daemonId = daemon.info.daemonId;
+    const seq = (this.canvasSummarySeq.get(daemonId) ?? 0) + 1;
+    this.canvasSummarySeq.set(daemonId, seq);
+    const candidates: CanvasSummaryData[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries.slice(0, MAX_ANNOTATION_SUMMARY_ENTRIES)) {
+      if (!validControlId(entry.workspaceId) || seen.has(entry.workspaceId)) continue;
+      if (!Number.isSafeInteger(entry.revision) || entry.revision < 0) continue;
+      seen.add(entry.workspaceId);
+      candidates.push({ workspaceId: entry.workspaceId as WorkspaceId, revision: entry.revision });
+    }
+    let owned: Set<string>;
+    try {
+      owned = candidates.length === 0 ? new Set() : new Set((await this.store.listWorkspacesByDaemon(daemonId)).map((workspace) => workspace.id));
+    } catch (error) {
+      log.warn("canvas summary validation failed", { daemonId, error: String(error) });
+      return;
+    }
+    if (!this.isCurrentDaemon(daemon) || this.canvasSummarySeq.get(daemonId) !== seq) return;
+    const valid = candidates.filter((entry) => owned.has(entry.workspaceId));
+    const previous = this.canvasSummaries.get(daemonId);
+    const unchanged =
+      previous !== undefined &&
+      previous.workspaces.length === valid.length &&
+      previous.workspaces.every((p, i) => p.workspaceId === valid[i]!.workspaceId && p.revision === valid[i]!.revision);
+    if (unchanged) return;
+    if (valid.length === 0 && previous === undefined) return;
+    if (valid.length === 0) this.canvasSummaries.delete(daemonId);
+    else this.canvasSummaries.set(daemonId, { accountId: daemon.accountId, workspaces: valid });
+    this.broadcast(daemon.accountId, { case: "canvasSummaryUpdated", value: { daemonId, workspaces: valid } });
   }
 
   /* ----------------------- durable prepared op ----------------------- */
@@ -2849,6 +2921,11 @@ export class Hub {
         if (daemon) void this.acceptAnnotationsSummary(daemon, msg.payload.value.workspaces);
         break;
       }
+      case "canvasSummary": {
+        const daemon = this.currentDaemon(conn);
+        if (daemon) void this.acceptCanvasSummary(daemon, msg.payload.value.workspaces);
+        break;
+      }
       case "agentControlRequest": {
         const daemon = this.currentDaemon(conn);
         if (daemon) await this.handleAgentControl(daemon, msg.payload.value);
@@ -3309,6 +3386,11 @@ export class Hub {
       if (this.annotationSummaries.delete(daemonId)) {
         this.broadcast(accountId, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: [] } });
       }
+      // Canvas summaries likewise (plan 20261112-agent-canvas).
+      this.canvasSummarySeq.set(daemonId, (this.canvasSummarySeq.get(daemonId) ?? 0) + 1);
+      if (this.canvasSummaries.delete(daemonId)) {
+        this.broadcast(accountId, { case: "canvasSummaryUpdated", value: { daemonId, workspaces: [] } });
+      }
       // close 清理也持 generation gate：后继连接只能在 lease/route/offline 广播全部收口后上线，
       // 避免旧 close continuation 在新连接 online 之后撤销新 lease 或补发 offline。
       await this.localControl.daemonDisconnected(daemonId);
@@ -3418,6 +3500,10 @@ export class Hub {
         // Annotation summaries too (plan 20260929-browser-annotations).
         for (const [daemonId, entry] of this.annotationSummaries) {
           if (entry.accountId === accountId) this.sendClientNow(client, { case: "annotationsSummaryUpdated", value: { daemonId, workspaces: entry.workspaces } });
+        }
+        // Canvas summaries too (plan 20261112-agent-canvas).
+        for (const [daemonId, entry] of this.canvasSummaries) {
+          if (entry.accountId === accountId) this.sendClientNow(client, { case: "canvasSummaryUpdated", value: { daemonId, workspaces: entry.workspaces } });
         }
         try {
           // ready prepared 列表也必须跨 complete 稳定：查询和投递都收进 service 的同一代际，

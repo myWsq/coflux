@@ -82,11 +82,6 @@ enum HomeRowMetrics {
     static let headerInsets = EdgeInsets(top: 16, leading: 16, bottom: 4, trailing: 14)
     /// How far a project's workspace rows sit in from the project row.
     static let workspaceIndent: CGFloat = 14
-
-    /// The scroll target of a workspace row.
-    static func workspaceRowID(_ workspaceID: String) -> String {
-        "workspace:\(workspaceID)"
-    }
 }
 
 /// 「当前」 and 「项目」. A current row opens through `onOpen`, because the surface owns the sheet a
@@ -186,7 +181,6 @@ struct HomeSections: View {
         }
         // Long press: copy the handle (plan 20260914), delete a non-main workspace
         .workspaceContextMenu(client: client, workspace: workspace)
-        .id(HomeRowMetrics.workspaceRowID(workspace.id))
     }
 
     // MARK: - Chrome
@@ -372,9 +366,12 @@ struct ProjectRowContent: View {
 
 extension View {
     /// Answers a jump (`SceneNavigation.show`) on the home or the sidebar: the shown workspace's
-    /// project expands and its row scrolls into view.
-    func revealsShownWorkspace(client: CofluxClient, proxy: ScrollViewProxy) -> some View {
-        modifier(RevealShownWorkspace(client: client, proxy: proxy))
+    /// project expands. Nothing scrolls: unlike the desktop sidebar, whose sections scroll on
+    /// their own, the whole page is one scroll here, and bringing the workspace row into view
+    /// would push 「当前」 — where the jump usually came from — off the screen (user's call,
+    /// 2026-11-15).
+    func expandsShownWorkspace(client: CofluxClient) -> some View {
+        modifier(ExpandShownWorkspace(client: client))
     }
 }
 
@@ -382,14 +379,13 @@ extension View {
 /// workspace that is already selected, the project covers a selection that arrives before the
 /// snapshot does. It does not follow the expanded set, so a project collapsed by hand stays
 /// collapsed until the next jump.
-private struct RevealShownWorkspace: ViewModifier {
+private struct ExpandShownWorkspace: ViewModifier {
     let client: CofluxClient
-    let proxy: ScrollViewProxy
     @Environment(SceneNavigation.self) private var navigation
 
     private var key: SceneNavigation.RevealKey {
         let workspace = navigation.workspaceID.flatMap { id in client.workspaces.first { $0.id == id } }
-        // A directory workspace has no project row: nothing to expand or scroll to.
+        // A directory workspace has no project row: nothing to expand.
         let projectID = workspace.flatMap { workspace in
             client.visibleProjects.contains { $0.id == workspace.projectID } ? workspace.projectID : nil
         }
@@ -400,15 +396,8 @@ private struct RevealShownWorkspace: ViewModifier {
         content.onChange(of: key, initial: true) { _, key in
             guard navigation.handledReveal != key else { return }
             navigation.handledReveal = key
-            guard !key.projectID.isEmpty, let workspaceID = navigation.workspaceID else { return }
+            guard !key.projectID.isEmpty, navigation.workspaceID != nil else { return }
             ExpandedProjects.shared.ensure(key.projectID, known: Set(client.projects.map(\.id)))
-            // The row exists only once the expansion has rendered.
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(80))
-                withAnimation(.snappy(duration: 0.2)) {
-                    proxy.scrollTo(HomeRowMetrics.workspaceRowID(workspaceID))
-                }
-            }
         }
     }
 }

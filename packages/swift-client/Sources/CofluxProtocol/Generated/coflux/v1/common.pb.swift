@@ -444,6 +444,11 @@ public struct Coflux_V1_SessionAgentRef: Sendable {
   /// the centre ignores it on input.
   public var seen: Bool = false
 
+  /// Milliseconds since the epoch at which this entry's `state` was entered, on the daemon's clock.
+  /// Set by the daemon and copied unchanged by the centre. It identifies "the same turn" and is
+  /// compared only for equality, never against another clock. 0 = not reported (older daemon).
+  public var stateSince: Double = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -799,6 +804,24 @@ public struct Coflux_V1_WorkspaceAnnotationSummary: Sendable {
   public var pending: UInt32 = 0
 
   public var resolved: UInt32 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// One workspace's canvases as the center may know them (plan 20261112-agent-canvas): a revision
+/// that changes whenever an agent shows or re-shows a canvas in the workspace. Nothing else — no
+/// title, no path: a desktop showing the workspace refetches the list over the Device channel when
+/// the revision changes.
+public struct Coflux_V1_WorkspaceCanvasSummary: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var workspaceID: String = String()
+
+  public var revision: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1266,7 +1289,7 @@ extension Coflux_V1_PortPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SessionAgentRef"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0\u{3}agent_session_id\0\u{1}seen\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}session_id\0\u{3}task_id\0\u{1}agent\0\u{1}state\0\u{1}message\0\u{1}progress\0\u{3}agent_session_id\0\u{1}seen\0\u{3}state_since\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1282,6 +1305,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
       case 6: try { try decoder.decodeSingularStringField(value: &self.progress) }()
       case 7: try { try decoder.decodeSingularStringField(value: &self.agentSessionID) }()
       case 8: try { try decoder.decodeSingularBoolField(value: &self.seen) }()
+      case 9: try { try decoder.decodeSingularDoubleField(value: &self.stateSince) }()
       default: break
       }
     }
@@ -1312,6 +1336,9 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if self.seen != false {
       try visitor.visitSingularBoolField(value: self.seen, fieldNumber: 8)
     }
+    if self.stateSince.bitPattern != 0 {
+      try visitor.visitSingularDoubleField(value: self.stateSince, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1324,6 +1351,7 @@ extension Coflux_V1_SessionAgentRef: SwiftProtobuf.Message, SwiftProtobuf._Messa
     if lhs.progress != rhs.progress {return false}
     if lhs.agentSessionID != rhs.agentSessionID {return false}
     if lhs.seen != rhs.seen {return false}
+    if lhs.stateSince != rhs.stateSince {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1965,6 +1993,41 @@ extension Coflux_V1_WorkspaceAnnotationSummary: SwiftProtobuf.Message, SwiftProt
     if lhs.revision != rhs.revision {return false}
     if lhs.pending != rhs.pending {return false}
     if lhs.resolved != rhs.resolved {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension Coflux_V1_WorkspaceCanvasSummary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".WorkspaceCanvasSummary"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}workspace_id\0\u{1}revision\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.workspaceID) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.revision) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.workspaceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.workspaceID, fieldNumber: 1)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt32Field(value: self.revision, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: Coflux_V1_WorkspaceCanvasSummary, rhs: Coflux_V1_WorkspaceCanvasSummary) -> Bool {
+    if lhs.workspaceID != rhs.workspaceID {return false}
+    if lhs.revision != rhs.revision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
