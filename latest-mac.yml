@@ -1,8 +1,8 @@
-version: 2.29.0
+version: 2.30.0
 files:
-  - url: https://dl.coflux.dev/releases/v2.29.0/coflux-2.29.0-arm64.zip
-    sha512: lXY10jN+PxRcSxWYCUCTq0Wi4f/vw4W6pDC3rKkNcHCJm4ZRhZJQ3EtbdxAqinHvIjoc5dE/IAlRbjcWtjy1Ig==
-    size: 190183448
-path: https://dl.coflux.dev/releases/v2.29.0/coflux-2.29.0-arm64.zip
-sha512: lXY10jN+PxRcSxWYCUCTq0Wi4f/vw4W6pDC3rKkNcHCJm4ZRhZJQ3EtbdxAqinHvIjoc5dE/IAlRbjcWtjy1Ig==
-releaseDate: '2026-11-17T16:44:06.698Z'
+  - url: https://dl.coflux.dev/releases/v2.30.0/coflux-2.30.0-arm64.zip
+    sha512: f4I5wYl3lQuhsFncF+obYzvQ7RaPSSXB3C0x/rJX3OHd5y65TIrxuY7i5/zqeSzuT8x52+1txQ3eRP7BreIdkg==
+    size: 190186110
+path: https://dl.coflux.dev/releases/v2.30.0/coflux-2.30.0-arm64.zip
+sha512: f4I5wYl3lQuhsFncF+obYzvQ7RaPSSXB3C0x/rJX3OHd5y65TIrxuY7i5/zqeSzuT8x52+1txQ3eRP7BreIdkg==
+releaseDate: '2026-11-18T17:44:14.085Z'
