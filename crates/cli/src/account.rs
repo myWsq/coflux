@@ -14,9 +14,12 @@ fn err(what: &str, next: &str) -> String {
     format!("{what}\n{next}")
 }
 const USAGE_NEXT: &str = "Run coflux --help for usage.";
-/// The public server. Sessions saved before it moved to its ICP-registered name name the old origin.
-const DEFAULT_SERVER: &str = "https://api.coflux.yourantiandi.com";
-const LEGACY_DEFAULT_SERVER: &str = "https://api.coflux.dev";
+/// The public server. Sessions saved before it moved to coflux.cn name one of its earlier origins.
+const DEFAULT_SERVER: &str = "https://api.coflux.cn";
+const LEGACY_DEFAULT_SERVERS: [&str; 2] = [
+    "https://api.coflux.dev",
+    "https://api.coflux.yourantiandi.com",
+];
 const LOGIN_NEXT: &str = "Sign in to the Coflux app, or run coflux login.";
 const QUERY_NEXT: &str = "Check whether it took effect before you try again.";
 
@@ -299,7 +302,7 @@ pub fn run(args: &ParsedArgs) -> Result<(), String> {
             let saved = origin(session["server"].as_str().ok_or_else(|| {
                 err("This CLI's sign-in record is damaged.", "Run coflux login again.")
             })?)?;
-            let server = if saved == LEGACY_DEFAULT_SERVER {
+            let server = if LEGACY_DEFAULT_SERVERS.contains(&saved.as_str()) {
                 DEFAULT_SERVER.to_string()
             } else {
                 saved

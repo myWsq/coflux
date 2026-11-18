@@ -3,14 +3,18 @@ import { readFileSync } from "node:fs";
 /**
  * 服务器地址（plan 103）：桌面下没有 location.host 可推导，地址由 app 侧给出。优先级：
  * 命令行 `--server=<ws(s) url>` > 环境变量 COFLUX_SERVER_URL > userData/settings.json 的 serverUrl >
- * 默认值（打包版 wss://api.coflux.yourantiandi.com/client；dev ws://localhost:8787/client）。非法值跳过、落到下一级。
+ * 默认值（打包版 wss://api.coflux.cn/client；dev ws://localhost:8787/client）。非法值跳过、落到下一级。
  */
-export const DEFAULT_SERVER_URL = "wss://api.coflux.yourantiandi.com/client";
+export const DEFAULT_SERVER_URL = "wss://api.coflux.cn/client";
 /**
- * The default before the centre moved to its ICP-registered name (2026-10-09). coflux.dev still reaches it
- * through a forwarder, but slowly; a saved or passed copy of the old default means "the public server".
+ * Earlier defaults of the public centre: api.coflux.dev until 2026-10-09, then the interim ICP-registered
+ * api.coflux.yourantiandi.com until coflux.cn (2026-11-19). Both still reach the same centre; a saved or
+ * passed copy of either means "the public server".
  */
-export const LEGACY_DEFAULT_SERVER_URL = "wss://api.coflux.dev/client";
+export const LEGACY_DEFAULT_SERVER_URLS: readonly string[] = [
+  "wss://api.coflux.dev/client",
+  "wss://api.coflux.yourantiandi.com/client",
+];
 export const DEV_SERVER_URL = "ws://localhost:8787/client";
 
 export type ServerUrlInput = {
@@ -34,7 +38,7 @@ export function isValidServerUrl(value: string | undefined): value is string {
 export function resolveServerUrl(input: ServerUrlInput): string {
   const fromArgv = input.argv.find((arg) => arg.startsWith("--server="))?.slice("--server=".length);
   const candidates = [fromArgv, input.env.COFLUX_SERVER_URL, input.fileServerUrl];
-  for (const candidate of candidates) if (isValidServerUrl(candidate)) return candidate === LEGACY_DEFAULT_SERVER_URL ? DEFAULT_SERVER_URL : candidate;
+  for (const candidate of candidates) if (isValidServerUrl(candidate)) return LEGACY_DEFAULT_SERVER_URLS.includes(candidate) ? DEFAULT_SERVER_URL : candidate;
   return input.packaged ? DEFAULT_SERVER_URL : DEV_SERVER_URL;
 }
 

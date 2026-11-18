@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_SERVER_URL, LEGACY_DEFAULT_SERVER_URL, isValidServerUrl, resolveServerUrl } from "./settings";
+import { DEFAULT_SERVER_URL, LEGACY_DEFAULT_SERVER_URLS, isValidServerUrl, resolveServerUrl } from "./settings";
 
 test("优先级：--server > COFLUX_SERVER_URL > settings.json > 默认", () => {
   const env = { COFLUX_SERVER_URL: "wss://env.example/client" };
@@ -10,8 +10,9 @@ test("优先级：--server > COFLUX_SERVER_URL > settings.json > 默认", () => 
   assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: "wss://file.example/client", packaged: true }), "wss://file.example/client");
 });
 
-test("旧默认地址（api.coflux.dev）映射到新默认地址，其余地址原样保留", () => {
-  assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: LEGACY_DEFAULT_SERVER_URL, packaged: true }), DEFAULT_SERVER_URL);
+test("旧默认地址（api.coflux.dev、api.coflux.yourantiandi.com）映射到新默认地址，其余地址原样保留", () => {
+  for (const legacy of LEGACY_DEFAULT_SERVER_URLS) assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: legacy, packaged: true }), DEFAULT_SERVER_URL);
+  assert.equal(DEFAULT_SERVER_URL, "wss://api.coflux.cn/client");
   assert.equal(resolveServerUrl({ argv: [], env: {}, fileServerUrl: "wss://api.coflux.dev/other", packaged: true }), "wss://api.coflux.dev/other");
 });
 
