@@ -169,7 +169,7 @@ jobs:
       - name: desktop 类型检查 + lint + 单元测试 + 构建
         run: pnpm -C apps/desktop typecheck && pnpm -C apps/desktop lint && pnpm -C apps/desktop test && pnpm -C apps/desktop build
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.1'
           cache-dependency-path: transport/tailcat/go.sum
